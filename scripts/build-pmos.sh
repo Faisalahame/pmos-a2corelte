@@ -34,7 +34,7 @@ on_err() {
   grep -aiE 'error|unable to select|no such package|required by|conflict|not found|failed|satisf|breaks' "$WORK/log.txt" 2>/dev/null \
     | grep -av 'APKINDEX\|Unable to find\|Error relocating' | tail -n 30 | cut -c1-300 | tee work/pmb-errors.log || true
   # kernel build logs (the touchscreen patch runs in the kernel package's prepare step)
-  grep -aE 'a2core touch|pmos-a2corelte touch|\*\*\*|error:|Error [0-9]' "$WORK/log.txt" 2>/dev/null | tail -n 40 | cut -c1-300 | tee work/pmb-kernel-errors.log || true
+  grep -aE 'pmos-a2corelte touch|\*\*\*|error:|Error [0-9]' "$WORK/log.txt" 2>/dev/null | tail -n 40 | cut -c1-300 | tee work/pmb-kernel-errors.log || true
 }
 trap on_err ERR
 
@@ -150,7 +150,8 @@ fi
 # one in bootloader mode) and no touch input device. So the kernel is built from source with two changes:
 #   1. devicetree: syna,startup-delay-ms / syna,reset-delay-ms = 500 ms on the touchscreen node
 #   2. rmi_driver.c: no initial reset command (just a 500 ms wait), like the stock Samsung driver
-# The kernel package (linux-postmarketos-exynos7870) gets a small block in its prepare() that does this.
+# The kernel package (linux-postmarketos-exynos7870) gets a small block at the END of its prepare() that does this
+# (the devicetree sources are only copied into the kernel tree at the end of prepare()).
 KDIR=$(find "$PMAPORTS" -maxdepth 4 -type d -name linux-postmarketos-exynos7870 | head -n1 || true)
 KCFG=""
 if [ -n "$KDIR" ]; then
@@ -179,7 +180,7 @@ if [ -z "$KDIR" ] || [ ! -f "$KDIR/APKBUILD" ]; then
 fi
 echo "===== kernel APKBUILD (before the touchscreen patch) ====="; cat "$KDIR/APKBUILD"
 
-# the block that goes into prepare() (runs in the kernel source directory, Alpine ash)
+# the block that goes at the end of prepare() (runs in the kernel source directory, Alpine ash)
 cat > work/touch-inject.sh <<'EOS'
 	# ---- pmos-a2corelte touch fix begin ----
 	_touch_dts=$(grep -rl 'syna,rmi4-i2c' arch/arm64/boot/dts/exynos/ | grep -v Makefile || true)
@@ -199,10 +200,11 @@ EOS
 
 if grep -q 'pmos-a2corelte touch fix begin' "$KDIR/APKBUILD"; then
   echo "touchscreen patch already in the kernel APKBUILD"
-elif grep -qE '^[[:space:]]+default_prepare' "$KDIR/APKBUILD"; then
-  sed -i '/^[[:space:]]*default_prepare/ r work/touch-inject.sh' "$KDIR/APKBUILD"
 elif grep -q '^prepare()' "$KDIR/APKBUILD"; then
-  sed -i '/^prepare()/ r work/touch-inject.sh' "$KDIR/APKBUILD"
+  # put the block in front of the closing brace of prepare()
+  awk -v f=work/touch-inject.sh '/^prepare\(\)/ { inp=1 } inp && /^}$/ { while ((getline l < f) > 0) print l; close(f); inp=0 } { print }' \
+    "$KDIR/APKBUILD" > work/APKBUILD.kernel.new
+  cp work/APKBUILD.kernel.new "$KDIR/APKBUILD"
 else
   { printf '\nprepare() {\n\tdefault_prepare\n'; cat work/touch-inject.sh; printf '}\n'; } >> "$KDIR/APKBUILD"
 fi
@@ -215,13 +217,21 @@ sed -n '/^prepare()/,/^}/p' "$KDIR/APKBUILD"
 
 pmbootstrap config || true
 
+# Build the patched kernel package explicitly: "pmbootstrap install" only builds the device package and
+# would take the mirror's kernel binary (an earlier run did exactly that: 8 minutes, no kernel build).
+# Its build() takes a while. The result is kernel 6.15 pkgrel 99 ("uname -a" on the phone shows #100-postmarketOS).
+pmbootstrap -y build --arch aarch64 --force linux-postmarketos-exynos7870
+grep -aE 'pmos-a2corelte touch fix' "$WORK/log.txt" 2>/dev/null | tail -n 30 | tee work/kernel-touch-patch.log || true
+ls -la "$WORK"/packages/edge/aarch64/ 2>/dev/null | grep -i linux-postmarketos || true
+
 # --split: boot and root as two separate images (we only use the bare root filesystem).
 # First try the default service manager. If installing the rootfs fails (an earlier run died in apk with
-# "failed to commit usr/bin/udevadm / usr/sbin/init" from the systemd-edge repo), retry once with OpenRC.
+# "failed to commit usr/bin/udevadm / usr/sbin/init" from the systemd-edge repo, and later while building systemd),
+# retry once with OpenRC.
 if ! pmbootstrap -y install --split --password "$PMOS_PASS"; then
   echo "WARN: pmbootstrap install failed with the default service manager -> retrying with OpenRC"
   cp -f "$WORK/log.txt" work/pmb-install-systemd-attempt.log 2>/dev/null || true
-  pmbootstrap -y zap || true
+  pmbootstrap -y zap -p || pmbootstrap -y zap || true
   pmbootstrap -y config service_manager openrc \
     || pmbootstrap -y config systemd never \
     || echo "WARN: neither 'service_manager openrc' nor 'systemd never' was accepted by this pmbootstrap"
@@ -235,8 +245,9 @@ sudo ls -la "$CH/boot" || true
 
 # which kernel is really in the rootfs (must be our own r99 build with the touchscreen patch)
 echo "== kernel package in the rootfs =="
-sudo chroot "$CH" apk info -v 2>/dev/null | grep -i linux-postmarketos || true
-grep -aE 'pmos-a2corelte touch fix' "$WORK/log.txt" 2>/dev/null | tail -n 20 | tee work/kernel-touch-patch.log || true
+sudo cat "$CH"/usr/share/kernel/postmarketos-exynos7870/kernel.release 2>/dev/null | tee work/kernel-release.log || true
+sudo ls "$CH"/usr/lib/apk/db 2>/dev/null | head -n 3 || true
+sudo grep -A1 '^P:linux-postmarketos-exynos7870$' "$CH"/lib/apk/db/installed 2>/dev/null | tee -a work/kernel-release.log || true
 
 rm -rf /tmp/pmos-export
 pmbootstrap -y export /tmp/pmos-export
