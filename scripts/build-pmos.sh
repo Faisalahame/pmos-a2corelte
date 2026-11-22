@@ -34,7 +34,7 @@ on_err() {
   grep -aiE 'error|unable to select|no such package|required by|conflict|not found|failed|satisf|breaks' "$WORK/log.txt" 2>/dev/null \
     | grep -av 'APKINDEX\|Unable to find\|Error relocating' | tail -n 30 | cut -c1-300 | tee work/pmb-errors.log || true
   # kernel build logs (the touchscreen patch runs in the kernel package's prepare step)
-  grep -aE 'pmos-a2corelte touch|\*\*\*|error:|Error [0-9]' "$WORK/log.txt" 2>/dev/null | tail -n 40 | cut -c1-300 | tee work/pmb-kernel-errors.log || true
+  grep -aE 'pmos-a2corelte touch|\*\*\*|error:|Error [0-9]|ERROR \(' "$WORK/log.txt" 2>/dev/null | tail -n 40 | cut -c1-300 | tee work/pmb-kernel-errors.log || true
 }
 trap on_err ERR
 
@@ -145,10 +145,12 @@ fi
 # ---- touchscreen ----
 # The A2 Core touchscreen is a Synaptics TD4101 (touch + display driver in one chip) on I2C address 0x4b, used with the
 # kernel's RMI4 driver (devicetree: syna,rmi4-i2c). The stock (TWRP) driver never resets the chip; the mainline driver
-# sends a reset command right away and, with the stock devicetree, talks to the chip without any start-up delay.
+# sends a reset command right away.
 # Result on the phone (pmos-diag): "RMI initial reset failed", then a duplicate rmi4-00.fn34 (the chip answers like
 # one in bootloader mode) and no touch input device. So the kernel is built from source with two changes:
 #   1. devicetree: syna,startup-delay-ms / syna,reset-delay-ms = 500 ms on the touchscreen node
+#      (the stock devicetree ALREADY has both properties, so the old lines are removed first, otherwise dtc fails
+#      with "Duplicate property name"; the old values are printed to the log)
 #   2. rmi_driver.c: no initial reset command (just a 500 ms wait), like the stock Samsung driver
 # The kernel package (linux-postmarketos-exynos7870) gets a small block at the END of its prepare() that does this
 # (the devicetree sources are only copied into the kernel tree at the end of prepare()).
@@ -186,9 +188,14 @@ cat > work/touch-inject.sh <<'EOS'
 	_touch_dts=$(grep -rl 'syna,rmi4-i2c' arch/arm64/boot/dts/exynos/ | grep -v Makefile || true)
 	[ -n "$_touch_dts" ] || { echo "pmos-a2corelte touch fix: ERROR no touchscreen node in the devicetrees"; return 1; }
 	for _f in $_touch_dts; do
+		echo "pmos-a2corelte touch fix: touchscreen lines BEFORE in $_f:"
+		grep -n 'syna,' "$_f" || true
+		sed -i '/syna,startup-delay-ms/d;/syna,reset-delay-ms/d' "$_f"
 		awk '{ print } /compatible = "syna,rmi4-i2c";/ { print "\t\tsyna,startup-delay-ms = <500>;"; print "\t\tsyna,reset-delay-ms = <500>;" }' "$_f" > "$_f.new" && mv "$_f.new" "$_f"
 		echo "pmos-a2corelte touch fix: devicetree patched: $_f"
 		grep -n 'syna,' "$_f"
+		[ "$(grep -c 'syna,startup-delay-ms' "$_f")" = 1 ] || { echo "pmos-a2corelte touch fix: ERROR startup-delay is not exactly once in $_f"; return 1; }
+		[ "$(grep -c 'syna,reset-delay-ms' "$_f")" = 1 ] || { echo "pmos-a2corelte touch fix: ERROR reset-delay is not exactly once in $_f"; return 1; }
 	done
 	_touch_rd=drivers/input/rmi4/rmi_driver.c
 	grep -q 'rmi_scan_pdt(rmi_dev, NULL, rmi_initial_reset)' "$_touch_rd" || { echo "pmos-a2corelte touch fix: ERROR rmi_initial_reset call not found in $_touch_rd"; return 1; }
