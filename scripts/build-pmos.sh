@@ -138,6 +138,34 @@ if [ "$DEVICE" = samsung-exynos7 ]; then
   echo "===== patched generic APKBUILD (head) ====="; head -n 25 "$GENERIC/APKBUILD"
 fi
 
+# ---- touchscreen ----
+# The A2 Core touchscreen is a Synaptics RMI4 chip on I2C (devicetree: syna,rmi4-i2c). The kernel needs the
+# RMI4 drivers. Print what the kernel config has; only if they are missing, switch them on (this makes
+# pmbootstrap build the kernel itself, which takes a lot longer, so it is not done when it is not needed).
+KDIR=$(find "$PMAPORTS" -maxdepth 4 -type d -name linux-postmarketos-exynos7870 | head -n1 || true)
+KCFG=""
+if [ -n "$KDIR" ]; then
+  KCFG=$(ls "$KDIR"/config-*.aarch64 2>/dev/null | head -n1 || true)
+fi
+if [ -n "$KCFG" ]; then
+  echo "===== kernel config: $KCFG ====="
+  grep -E 'RMI4|INPUT_TOUCHSCREEN|^CONFIG_I2C=|I2C_S3C|I2C_EXYNOS' "$KCFG" | tee work/kernel-touch-config.log || true
+  if grep -qE '^CONFIG_RMI4_I2C=[ym]' "$KCFG" && grep -qE '^CONFIG_RMI4_F12=[ym]' "$KCFG"; then
+    echo "RMI4 touchscreen drivers are already enabled in the kernel config"
+  else
+    echo "RMI4 touchscreen drivers are MISSING from the kernel config -> enabling them (kernel gets built from source)"
+    for o in INPUT_TOUCHSCREEN RMI4_CORE RMI4_I2C RMI4_F01 RMI4_F11 RMI4_F12; do
+      sed -i "/^CONFIG_${o}=/d;/^# CONFIG_${o} is not set/d" "$KCFG"
+    done
+    echo >> "$KCFG"
+    printf '%s\n' CONFIG_INPUT_TOUCHSCREEN=y CONFIG_RMI4_CORE=y CONFIG_RMI4_I2C=y CONFIG_RMI4_F01=y CONFIG_RMI4_F11=y CONFIG_RMI4_F12=y >> "$KCFG"
+    sed -i 's/^pkgrel=.*/pkgrel=99/' "$KDIR/APKBUILD"
+    pmbootstrap -y checksum linux-postmarketos-exynos7870
+  fi
+else
+  echo "WARN: kernel config of linux-postmarketos-exynos7870 not found in pmaports, not touching it"
+fi
+
 pmbootstrap config || true
 
 # --split: boot and root as two separate images (we only use the bare root filesystem).
