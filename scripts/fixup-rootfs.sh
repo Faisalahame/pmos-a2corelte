@@ -9,6 +9,7 @@
 #   * touchscreen: if the first probe of the Synaptics RMI4 chip fails at boot, ~30 s after boot the driver is
 #     re-probed (the kernel logs every PDT entry the chip lists, "pmos-a2corelte PDT"), and then the chip's
 #     registers are read raw with i2ctransfer (section "raw i2c test" at the end of /var/log/pmos-touch-debug.txt)
+#   * at the very end scripts/setup-wifi-ssh.sh runs: the phone joins the mobile hotspot "faisal" on boot (SSH from Termux)
 # usage: sudo bash scripts/fixup-rootfs.sh work/pmos-root.img
 set -euxo pipefail
 IMG="${1:?usage: fixup-rootfs.sh root.img}"
@@ -265,3 +266,6 @@ sync
 umount "$M"
 e2fsck -fn "$IMG"
 echo "fixup done"
+
+# ---- Wi-Fi: join the mobile hotspot "faisal" on boot + sshd (own script, mounts the image again) ----
+bash "$(dirname "$0")/setup-wifi-ssh.sh" "$IMG"
