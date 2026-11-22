@@ -10,6 +10,8 @@
 # exynos7870 kernel) and copy the old a2corelte boot.img settings (offsets, page size, cmdline,
 # dtb, mkbootimg/dtbtool) from pmaports git history into it.
 #
+# TOUCHSCREEN: the kernel is built FROM SOURCE with two small touchscreen changes (see "touchscreen" below).
+#
 # env: UI = postmarketOS user interface (default phosh)
 set -euxo pipefail
 cd "$(dirname "$0")/.."
@@ -31,6 +33,8 @@ on_err() {
   echo "== pmbootstrap log: error lines =="
   grep -aiE 'error|unable to select|no such package|required by|conflict|not found|failed|satisf|breaks' "$WORK/log.txt" 2>/dev/null \
     | grep -av 'APKINDEX\|Unable to find\|Error relocating' | tail -n 30 | cut -c1-300 | tee work/pmb-errors.log || true
+  # kernel build logs (the touchscreen patch runs in the kernel package's prepare step)
+  grep -aE 'a2core touch|pmos-a2corelte touch|\*\*\*|error:|Error [0-9]' "$WORK/log.txt" 2>/dev/null | tail -n 40 | cut -c1-300 | tee work/pmb-kernel-errors.log || true
 }
 trap on_err ERR
 
@@ -139,9 +143,14 @@ if [ "$DEVICE" = samsung-exynos7 ]; then
 fi
 
 # ---- touchscreen ----
-# The A2 Core touchscreen is a Synaptics RMI4 chip on I2C (devicetree: syna,rmi4-i2c). The kernel needs the
-# RMI4 drivers. Print what the kernel config has; only if they are missing, switch them on (this makes
-# pmbootstrap build the kernel itself, which takes a lot longer, so it is not done when it is not needed).
+# The A2 Core touchscreen is a Synaptics TD4101 (touch + display driver in one chip) on I2C address 0x4b, used with the
+# kernel's RMI4 driver (devicetree: syna,rmi4-i2c). The stock (TWRP) driver never resets the chip; the mainline driver
+# sends a reset command right away and, with the stock devicetree, talks to the chip without any start-up delay.
+# Result on the phone (pmos-diag): "RMI initial reset failed", then a duplicate rmi4-00.fn34 (the chip answers like
+# one in bootloader mode) and no touch input device. So the kernel is built from source with two changes:
+#   1. devicetree: syna,startup-delay-ms / syna,reset-delay-ms = 500 ms on the touchscreen node
+#   2. rmi_driver.c: no initial reset command (just a 500 ms wait), like the stock Samsung driver
+# The kernel package (linux-postmarketos-exynos7870) gets a small block in its prepare() that does this.
 KDIR=$(find "$PMAPORTS" -maxdepth 4 -type d -name linux-postmarketos-exynos7870 | head -n1 || true)
 KCFG=""
 if [ -n "$KDIR" ]; then
@@ -153,18 +162,56 @@ if [ -n "$KCFG" ]; then
   if grep -qE '^CONFIG_RMI4_I2C=[ym]' "$KCFG" && grep -qE '^CONFIG_RMI4_F12=[ym]' "$KCFG"; then
     echo "RMI4 touchscreen drivers are already enabled in the kernel config"
   else
-    echo "RMI4 touchscreen drivers are MISSING from the kernel config -> enabling them (kernel gets built from source)"
+    echo "RMI4 touchscreen drivers are MISSING from the kernel config -> enabling them"
     for o in INPUT_TOUCHSCREEN RMI4_CORE RMI4_I2C RMI4_F01 RMI4_F11 RMI4_F12; do
       sed -i "/^CONFIG_${o}=/d;/^# CONFIG_${o} is not set/d" "$KCFG"
     done
     echo >> "$KCFG"
     printf '%s\n' CONFIG_INPUT_TOUCHSCREEN=y CONFIG_RMI4_CORE=y CONFIG_RMI4_I2C=y CONFIG_RMI4_F01=y CONFIG_RMI4_F11=y CONFIG_RMI4_F12=y >> "$KCFG"
-    sed -i 's/^pkgrel=.*/pkgrel=99/' "$KDIR/APKBUILD"
-    pmbootstrap -y checksum linux-postmarketos-exynos7870
   fi
 else
-  echo "WARN: kernel config of linux-postmarketos-exynos7870 not found in pmaports, not touching it"
+  echo "WARN: kernel config of linux-postmarketos-exynos7870 not found in pmaports"
 fi
+
+if [ -z "$KDIR" ] || [ ! -f "$KDIR/APKBUILD" ]; then
+  echo "ERROR: linux-postmarketos-exynos7870 is not in pmaports, cannot apply the touchscreen fix"
+  exit 1
+fi
+echo "===== kernel APKBUILD (before the touchscreen patch) ====="; cat "$KDIR/APKBUILD"
+
+# the block that goes into prepare() (runs in the kernel source directory, Alpine ash)
+cat > work/touch-inject.sh <<'EOS'
+	# ---- pmos-a2corelte touch fix begin ----
+	_touch_dts=$(grep -rl 'syna,rmi4-i2c' arch/arm64/boot/dts/exynos/ | grep -v Makefile || true)
+	[ -n "$_touch_dts" ] || { echo "pmos-a2corelte touch fix: ERROR no touchscreen node in the devicetrees"; return 1; }
+	for _f in $_touch_dts; do
+		awk '{ print } /compatible = "syna,rmi4-i2c";/ { print "\t\tsyna,startup-delay-ms = <500>;"; print "\t\tsyna,reset-delay-ms = <500>;" }' "$_f" > "$_f.new" && mv "$_f.new" "$_f"
+		echo "pmos-a2corelte touch fix: devicetree patched: $_f"
+		grep -n 'syna,' "$_f"
+	done
+	_touch_rd=drivers/input/rmi4/rmi_driver.c
+	grep -q 'rmi_scan_pdt(rmi_dev, NULL, rmi_initial_reset)' "$_touch_rd" || { echo "pmos-a2corelte touch fix: ERROR rmi_initial_reset call not found in $_touch_rd"; return 1; }
+	sed -i 's|retval = rmi_scan_pdt(rmi_dev, NULL, rmi_initial_reset);|msleep(500); retval = 0; /* pmos-a2corelte: no initial reset, like the stock driver */|' "$_touch_rd"
+	grep -q '<linux/delay.h>' "$_touch_rd" || sed -i '0,/#include <linux\/module.h>/s||#include <linux/module.h>\n#include <linux/delay.h>|' "$_touch_rd"
+	grep -n 'pmos-a2corelte\|linux/delay.h' "$_touch_rd"
+	# ---- pmos-a2corelte touch fix end ----
+EOS
+
+if grep -q 'pmos-a2corelte touch fix begin' "$KDIR/APKBUILD"; then
+  echo "touchscreen patch already in the kernel APKBUILD"
+elif grep -qE '^[[:space:]]+default_prepare' "$KDIR/APKBUILD"; then
+  sed -i '/^[[:space:]]*default_prepare/ r work/touch-inject.sh' "$KDIR/APKBUILD"
+elif grep -q '^prepare()' "$KDIR/APKBUILD"; then
+  sed -i '/^prepare()/ r work/touch-inject.sh' "$KDIR/APKBUILD"
+else
+  { printf '\nprepare() {\n\tdefault_prepare\n'; cat work/touch-inject.sh; printf '}\n'; } >> "$KDIR/APKBUILD"
+fi
+grep -q 'pmos-a2corelte touch fix begin' "$KDIR/APKBUILD" || { echo "ERROR: could not insert the touchscreen patch into the kernel APKBUILD"; exit 1; }
+# build the kernel from source instead of using the mirror's binary
+sed -i 's/^pkgrel=.*/pkgrel=99/' "$KDIR/APKBUILD"
+pmbootstrap -y checksum linux-postmarketos-exynos7870
+echo "===== kernel prepare() after the touchscreen patch ====="
+sed -n '/^prepare()/,/^}/p' "$KDIR/APKBUILD"
 
 pmbootstrap config || true
 
@@ -185,6 +232,11 @@ fi
 CH="$WORK/chroot_rootfs_$DEVICE"
 echo "== rootfs /boot =="
 sudo ls -la "$CH/boot" || true
+
+# which kernel is really in the rootfs (must be our own r99 build with the touchscreen patch)
+echo "== kernel package in the rootfs =="
+sudo chroot "$CH" apk info -v 2>/dev/null | grep -i linux-postmarketos || true
+grep -aE 'pmos-a2corelte touch fix' "$WORK/log.txt" 2>/dev/null | tail -n 20 | tee work/kernel-touch-patch.log || true
 
 rm -rf /tmp/pmos-export
 pmbootstrap -y export /tmp/pmos-export
