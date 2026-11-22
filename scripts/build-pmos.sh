@@ -113,6 +113,13 @@ pmbootstrap -y config hostname "$PMOS_HOST"
 pmbootstrap -y config extra_packages "$EXTRA_PKGS" || echo "WARN: extra_packages not accepted"
 # close-to-mainline Exynos 7870 kernel variant of the generic port
 pmbootstrap -y config kernel exynos7870 || echo "WARN: kernel option 'exynos7870' not accepted, keeping default"
+# OpenRC from the start. With the default (systemd) service manager "pmbootstrap install" died in every run while it
+# built the systemd package, and the old fallback ("zap -p") then DELETED the kernel package we had just built, so the
+# rootfs got the mirror's kernel (6.15-r6) and none of the touchscreen changes (run of 15:28).
+pmbootstrap -y config service_manager openrc \
+  || pmbootstrap -y config systemd never \
+  || echo "WARN: neither 'service_manager openrc' nor 'systemd never' was accepted by this pmbootstrap"
+pmbootstrap config | grep -iE 'service_manager|systemd' || true
 
 if [ "$DEVICE" = samsung-exynos7 ]; then
   # ---- give the generic port the old a2corelte Android boot.img settings ----
@@ -226,25 +233,17 @@ pmbootstrap config || true
 
 # Build the patched kernel package explicitly: "pmbootstrap install" only builds the device package and
 # would take the mirror's kernel binary (an earlier run did exactly that: 8 minutes, no kernel build).
-# Its build() takes a while. The result is kernel 6.15 pkgrel 99 ("uname -a" on the phone shows #100-postmarketOS).
+# The build takes about 25 minutes. The result is kernel 6.15 pkgrel 99 ("uname -a" on the phone shows #100-postmarketOS).
 pmbootstrap -y build --arch aarch64 --force linux-postmarketos-exynos7870
 grep -aE 'pmos-a2corelte touch fix' "$WORK/log.txt" 2>/dev/null | tail -n 30 | tee work/kernel-touch-patch.log || true
 ls -la "$WORK"/packages/edge/aarch64/ 2>/dev/null | grep -i linux-postmarketos || true
+[ -s "$WORK"/packages/edge/aarch64/linux-postmarketos-exynos7870-6.15-r99.apk ] \
+  || { echo "ERROR: the patched kernel package linux-postmarketos-exynos7870-6.15-r99.apk was not built"; exit 1; }
 
 # --split: boot and root as two separate images (we only use the bare root filesystem).
-# First try the default service manager. If installing the rootfs fails (an earlier run died in apk with
-# "failed to commit usr/bin/udevadm / usr/sbin/init" from the systemd-edge repo, and later while building systemd),
-# retry once with OpenRC.
-if ! pmbootstrap -y install --split --password "$PMOS_PASS"; then
-  echo "WARN: pmbootstrap install failed with the default service manager -> retrying with OpenRC"
-  cp -f "$WORK/log.txt" work/pmb-install-systemd-attempt.log 2>/dev/null || true
-  pmbootstrap -y zap -p || pmbootstrap -y zap || true
-  pmbootstrap -y config service_manager openrc \
-    || pmbootstrap -y config systemd never \
-    || echo "WARN: neither 'service_manager openrc' nor 'systemd never' was accepted by this pmbootstrap"
-  pmbootstrap config | grep -iE 'service_manager|systemd' || true
-  pmbootstrap -y install --split --password "$PMOS_PASS"
-fi
+# NO "pmbootstrap zap -p" here: it deletes the locally built packages, i.e. the kernel built above.
+pmbootstrap -y install --split --password "$PMOS_PASS" \
+  || { cp -f "$WORK/log.txt" work/pmb-install-attempt.log 2>/dev/null || true; false; }
 
 CH="$WORK/chroot_rootfs_$DEVICE"
 echo "== rootfs /boot =="
@@ -255,6 +254,9 @@ echo "== kernel package in the rootfs =="
 sudo cat "$CH"/usr/share/kernel/postmarketos-exynos7870/kernel.release 2>/dev/null | tee work/kernel-release.log || true
 sudo ls "$CH"/usr/lib/apk/db 2>/dev/null | head -n 3 || true
 sudo grep -A1 '^P:linux-postmarketos-exynos7870$' "$CH"/lib/apk/db/installed 2>/dev/null | tee -a work/kernel-release.log || true
+KV=$(sudo grep -A1 '^P:linux-postmarketos-exynos7870$' "$CH"/lib/apk/db/installed 2>/dev/null | sed -n 's/^V://p' | head -n1 || true)
+echo "kernel package version in the rootfs: '$KV'"
+[ "$KV" = "6.15-r99" ] || { echo "ERROR: the rootfs has linux-postmarketos-exynos7870 '$KV' and not our own 6.15-r99 build with the touchscreen patch"; exit 1; }
 
 rm -rf /tmp/pmos-export
 pmbootstrap -y export /tmp/pmos-export
