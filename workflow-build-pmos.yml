@@ -1,0 +1,70 @@
+name: build-pmos
+# Builds ONE TWRP zip: postmarketOS for the Galaxy A2 Core, installed to the internal storage with "adb sideload".
+# Starts by itself when scripts/** or this file change on main, or run it by hand (Actions tab -> Run workflow).
+on:
+  workflow_dispatch:
+    inputs:
+      ui:
+        description: "postmarketOS user interface (phosh, sxmo-de-sway, xfce4, none)"
+        default: "phosh"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/build-pmos.yml"
+      - "scripts/**"
+concurrency:
+  group: build-pmos
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/share/swift
+          sudo apt-get clean
+          df -h /
+      - name: Host packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user-static binfmt-support e2fsprogs pigz curl git xz-utils kmod \
+            zstd lz4 bzip2 binutils zip unzip android-sdk-libsparse-utils fdisk util-linux openssl procps python3
+      - name: Build postmarketOS (kernel, boot.img, root filesystem)
+        env:
+          UI: ${{ inputs.ui || 'phosh' }}
+        run: bash scripts/build-pmos.sh
+      - name: Prepare the root filesystem (fstab, first-boot grow, sshd, USB network)
+        run: sudo bash scripts/fixup-rootfs.sh work/pmos-root.img 2>&1 | tee work/fixup.log
+      - name: Make the Samsung boot image (raw kernel, tiny initramfs)
+        run: python3 scripts/make-boot.py out/boot.img scripts/initramfs-init work/boot-pmos.img 2>&1 | tee work/make-boot.log
+      - name: Make the flashable zip
+        run: |
+          python3 scripts/make-zip.py out/pmos-a2corelte.zip work/boot-pmos.img work/pmos-root.img scripts/update-binary.sh 2>&1 | tee work/make-zip.log
+          ls -la out
+          sha256sum out/pmos-a2corelte.zip | tee out/pmos-a2corelte.zip.sha256
+      - name: Show build errors
+        if: failure()
+        run: |
+          for f in work/*.log; do
+            echo "::error title=$f::$(tail -n 25 "$f" | tr '\n' '|' | cut -c1-3500)"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pmos-a2corelte
+          path: |
+            out/pmos-a2corelte.zip
+            out/pmos-a2corelte.zip.sha256
+          compression-level: 0
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pmos-logs
+          path: |
+            work/*.log
+            work/old-deviceinfo
+            work/old-APKBUILD
+          if-no-files-found: ignore
