@@ -22,7 +22,8 @@ UI="${UI:-phosh}"
 PMOS_USER=user
 PMOS_PASS=147147
 PMOS_HOST=a2corelte
-EXTRA_PKGS="openssh,e2fsprogs-extra,nano"
+# i2c-tools: i2ctransfer, used by the boot diagnostics to read the touchscreen chip's registers raw
+EXTRA_PKGS="openssh,e2fsprogs-extra,nano,i2c-tools"
 
 WORK="$HOME/.local/var/pmbootstrap"
 PMAPORTS="$WORK/cache_git/pmaports"
@@ -162,7 +163,11 @@ fi
 #   2. rmi_driver.c: no initial reset command (just a 500 ms wait), like the stock Samsung driver
 #   3. rmi_driver.c, rmi_create_function(): a PDT entry whose function number was already created is skipped, and every
 #      PDT entry is logged with dev_info (this kernel has no dynamic debug), so dmesg shows what the chip lists
-# (the devicetree sources are only copied into the kernel tree at the end of prepare()).
+# (the devicetree sources are only copied into the kernel tree at the end of prepare().)
+# Run of 17:52 (commit 77351b4): the duplicate skip works, but the chip's table lists only F34, F1B and F04 (the same three
+# entries on pages 0 to 12) and no F01/F12, so the probe stops with "Missing F01 container". The stock driver reads F12/F51
+# fine on the same bus. So the boot diagnostics now also read the chip's registers raw with i2ctransfer (i2c-tools) and
+# the kernel gets CONFIG_I2C_CHARDEV (/dev/i2c-3).
 KDIR=$(find "$PMAPORTS" -maxdepth 4 -type d -name linux-postmarketos-exynos7870 | head -n1 || true)
 KCFG=""
 if [ -n "$KDIR" ]; then
@@ -181,6 +186,12 @@ if [ -n "$KCFG" ]; then
     echo >> "$KCFG"
     printf '%s\n' CONFIG_INPUT_TOUCHSCREEN=y CONFIG_RMI4_CORE=y CONFIG_RMI4_I2C=y CONFIG_RMI4_F01=y CONFIG_RMI4_F11=y CONFIG_RMI4_F12=y >> "$KCFG"
   fi
+  # /dev/i2c-N, so the boot diagnostics can read the touchscreen chip raw with i2ctransfer
+  if ! grep -qE '^CONFIG_I2C_CHARDEV=[ym]' "$KCFG"; then
+    sed -i '/^CONFIG_I2C_CHARDEV=/d;/^# CONFIG_I2C_CHARDEV is not set/d' "$KCFG"
+    printf '\nCONFIG_I2C_CHARDEV=y\n' >> "$KCFG"
+  fi
+  grep -E 'I2C_CHARDEV' "$KCFG" | tee -a work/kernel-touch-config.log || true
 else
   echo "WARN: kernel config of linux-postmarketos-exynos7870 not found in pmaports"
 fi

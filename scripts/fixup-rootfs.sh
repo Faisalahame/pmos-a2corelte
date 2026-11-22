@@ -7,7 +7,8 @@
 #   * sshd is switched on, and NetworkManager leaves the USB network (usb0) alone
 #   * a boot diagnostics log is written to /var/log/pmos-diag.txt (readable from TWRP, no PC or SSH needed)
 #   * touchscreen: if the first probe of the Synaptics RMI4 chip fails at boot, ~30 s after boot the driver is
-#     re-probed (the kernel logs every PDT entry the chip lists, "pmos-a2corelte PDT")
+#     re-probed (the kernel logs every PDT entry the chip lists, "pmos-a2corelte PDT"), and then the chip's
+#     registers are read raw with i2ctransfer (section "raw i2c test" at the end of /var/log/pmos-touch-debug.txt)
 # usage: sudo bash scripts/fixup-rootfs.sh work/pmos-root.img
 set -euxo pipefail
 IMG="${1:?usage: fixup-rootfs.sh root.img}"
@@ -38,6 +39,8 @@ ls -d "$M/usr/lib/systemd/system" "$M/lib/systemd/system" "$M/etc/init.d" 2>/dev
 ls "$M/usr/sbin/resize2fs" "$M/sbin/resize2fs" 2>/dev/null || echo "WARN: resize2fs not in the image, the filesystem will not grow by itself"
 echo "== touchscreen modules in the image =="
 ls "$M"/lib/modules/*/kernel/drivers/input/rmi4 2>&1 || echo "(no rmi4 modules on disk: built into the kernel, or missing)"
+echo "== i2c-tools in the image =="
+ls "$M"/usr/bin/i2ctransfer "$M"/usr/sbin/i2ctransfer 2>&1 || echo "WARN: i2ctransfer is not in the image, the raw i2c test will be skipped"
 
 # ---- fstab ----
 cat > "$M/etc/fstab" <<'EOF'
@@ -66,8 +69,9 @@ cat > "$M/usr/local/sbin/pmos-diag" <<'EOF'
 # 1) ~25 s after boot: first snapshot (so something is on disk even if the phone is rebooted early)
 # 2) ~30 s after boot: if no touchscreen input device exists, re-probe the Synaptics RMI4 driver (3 tries)
 #    and log what the kernel says. If a re-probe works, touch simply starts working.
-# 3) Saves boot diagnostics to /var/log/pmos-diag.txt so they can be read from TWRP.
-#    The whole run takes about 2.5 minutes: wait for it before rebooting to TWRP.
+# 3) then read the touchscreen chip's registers raw (i2ctransfer on /dev/i2c-3), several access patterns
+# 4) Saves boot diagnostics to /var/log/pmos-diag.txt so they can be read from TWRP.
+#    The whole run takes about 3 minutes: wait for it before rebooting to TWRP.
 OUT=/var/log/pmos-diag.txt
 TOUT=/var/log/pmos-touch-debug.txt
 DEV=3-004b
@@ -105,6 +109,42 @@ touch_debug() {
   sync
 }
 
+# Raw register reads of the chip at 0x4b on /dev/i2c-3 (the RMI4 driver is unbound first). The stock Samsung driver sees
+# F12/F51 and a product ID TD4101 on this same bus, the mainline driver only gets F34/F1B/F04. This shows what the chip
+# returns for different access patterns. i2ctransfer prints the bytes it read as 0x.. 0x.. (an error text if it failed).
+raw_i2c() {
+  {
+    echo
+    echo "== raw i2c test at $(date), uptime $(cut -d' ' -f1 /proc/uptime) s"
+    modprobe i2c-dev 2>&1 || true
+    ls -la /dev/i2c-* 2>&1 || true
+    if ! command -v i2ctransfer >/dev/null 2>&1; then echo "(no i2ctransfer binary, raw test skipped)"; exit 0; fi
+    [ -e "$DRV/$DEV" ] && echo "$DEV" > "$DRV/unbind"
+    sleep 1
+    T="i2ctransfer -f -y 3"
+    A=0x4b
+    echo "-- page select register 0xff:"; $T w1@$A 0xff r1@$A 2>&1
+    for p in 0x00 0x01 0x02 0x03; do
+      echo "-- select page $p (write 0xff $p), then PDT entries: 6 bytes at 0xe9, 0xe3, 0xdd, ... (write address + read, repeated start)"
+      $T w2@$A 0xff $p 2>&1
+      printf '   page select reads back: '; $T w1@$A 0xff r1@$A 2>&1
+      for o in 0xe9 0xe3 0xdd 0xd7 0xd1 0xcb 0xc5; do printf '   %s: ' $o; $T w1@$A $o r6@$A 2>&1; done
+      printf '   one 42-byte read 0xc5..0xee: '; $T w1@$A 0xc5 r42@$A 2>&1
+    done
+    echo "-- page 0, address write and read as two separate transactions"
+    $T w2@$A 0xff 0x00 2>&1
+    for o in 0xe9 0xe3 0xdd; do printf '   %s: ' $o; $T w1@$A $o 2>&1; $T r6@$A 2>&1; done
+    echo "-- page 0, 0xe9..0xee one byte per transaction"
+    for i in 0 1 2 3 4 5; do o=$(printf '0x%02x' $((0xe9 + i))); printf '   %s: ' $o; $T w1@$A $o r1@$A 2>&1; done
+    echo "-- page 0, first 64 bytes from 0x00"
+    $T w1@$A 0x00 r64@$A 2>&1
+    echo "-- read without an address write (where the chip's read pointer is)"
+    $T r12@$A 2>&1
+    echo "== raw i2c test done at $(date)"
+  } >> "$TOUT" 2>&1
+  sync
+}
+
 snap() {
   {
     echo "== pmos-diag at $(date), uptime $(cut -d' ' -f1 /proc/uptime) s"
@@ -118,7 +158,7 @@ snap() {
       echo "$d name=$(cat "$d/name" 2>/dev/null) driver=$(readlink "$d/driver" 2>/dev/null)"
     done
     echo "== rmi modules on disk"; ls /lib/modules/*/kernel/drivers/input/rmi4 2>&1
-    echo "== kernel config"; zcat /proc/config.gz 2>/dev/null | grep -E 'RMI4|INPUT_TOUCHSCREEN|DYNAMIC_DEBUG' || echo "(no /proc/config.gz)"
+    echo "== kernel config"; zcat /proc/config.gz 2>/dev/null | grep -E 'RMI4|INPUT_TOUCHSCREEN|DYNAMIC_DEBUG|I2C_CHARDEV' || echo "(no /proc/config.gz)"
     echo "== touch re-probe log ($TOUT)"; cat "$TOUT" 2>&1
     echo "== dmesg (full)"; dmesg
   } > "$OUT.tmp" 2>&1
@@ -128,6 +168,7 @@ snap() {
 
 sleep 25; snap
 sleep 5; touch_debug
+raw_i2c
 snap
 sleep 90; snap
 exit 0
