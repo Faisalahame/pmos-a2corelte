@@ -6,6 +6,8 @@
 #   * first boot grows the filesystem to the whole USERDATA partition (resize2fs, online)
 #   * sshd is switched on, and NetworkManager leaves the USB network (usb0) alone
 #   * a boot diagnostics log is written to /var/log/pmos-diag.txt (readable from TWRP, no PC or SSH needed)
+#   * touchscreen: the first probe of the Synaptics RMI4 chip fails at boot ("RMI initial reset failed",
+#     then a duplicate rmi4-00.fn34), so ~30 s after boot the driver is re-probed with debug output on
 # usage: sudo bash scripts/fixup-rootfs.sh work/pmos-root.img
 set -euxo pipefail
 IMG="${1:?usage: fixup-rootfs.sh root.img}"
@@ -58,12 +60,58 @@ exit 0
 EOF
 chmod 755 "$M/usr/local/sbin/pmos-growfs"
 
-# ---- boot diagnostics: /var/log/pmos-diag.txt, rewritten 40 s and 150 s after every boot ----
+# ---- boot diagnostics + touchscreen re-probe ----
 cat > "$M/usr/local/sbin/pmos-diag" <<'EOF'
 #!/bin/sh
-# Saves boot diagnostics to /var/log/pmos-diag.txt so they can be read from TWRP
-# when the screen or the touchscreen does not work.
+# 1) ~30 s after boot: if no touchscreen input device exists, re-probe the Synaptics RMI4 driver
+#    (3 tries, with dynamic debug on so the log shows what the chip answers). If a re-probe works,
+#    touch simply starts working.
+# 2) Saves boot diagnostics to /var/log/pmos-diag.txt so they can be read from TWRP.
 OUT=/var/log/pmos-diag.txt
+TOUT=/var/log/pmos-touch-debug.txt
+DEV=3-004b
+DRV=/sys/bus/i2c/drivers/rmi4_i2c
+
+have_touch() { grep -qiE 'synaptics|rmi' /proc/bus/input/devices; }
+
+touch_debug() {
+  {
+    echo "== touch re-probe at $(date), uptime $(cut -d' ' -f1 /proc/uptime) s"
+    if have_touch; then echo "touchscreen input device already present, nothing to do"; return 0; fi
+    mount -t debugfs none /sys/kernel/debug 2>/dev/null
+    DYN=/sys/kernel/debug/dynamic_debug/control
+    if [ -w "$DYN" ]; then
+      echo 'module rmi_core +p' > "$DYN"
+      echo 'module rmi_i2c +p' > "$DYN"
+      echo "dynamic debug enabled for rmi_core / rmi_i2c"
+    else
+      echo "(no dynamic_debug control file, CONFIG_DYNAMIC_DEBUG or debugfs missing)"
+    fi
+    n=1
+    while [ $n -le 3 ]; do
+      echo "-- try $n: unbind/bind $DEV"
+      echo "== MARK touch reprobe try $n" > /dev/kmsg
+      [ -e "$DRV/$DEV" ] && echo "$DEV" > "$DRV/unbind"
+      sleep 1
+      echo "$DEV" > "$DRV/bind"
+      sleep 4
+      dmesg | sed -n "/MARK touch reprobe try $n/,\$p" | head -n 120
+      if have_touch; then echo "-- touchscreen input device appeared after try $n"; return 0; fi
+      n=$((n+1))
+      sleep 6
+    done
+    echo "-- unbind/bind did not help, reloading the modules"
+    echo "== MARK touch module reload" > /dev/kmsg
+    modprobe -r rmi_i2c rmi_core 2>&1
+    sleep 1
+    modprobe rmi_i2c 2>&1
+    sleep 5
+    dmesg | sed -n '/MARK touch module reload/,$p' | head -n 120
+    if have_touch; then echo "-- touchscreen input device appeared after the module reload"; else echo "-- still no touchscreen input device"; fi
+  } > "$TOUT" 2>&1
+  sync
+}
+
 snap() {
   {
     echo "== pmos-diag at $(date), uptime $(cut -d' ' -f1 /proc/uptime) s"
@@ -77,14 +125,17 @@ snap() {
       echo "$d name=$(cat "$d/name" 2>/dev/null) driver=$(readlink "$d/driver" 2>/dev/null)"
     done
     echo "== rmi modules on disk"; ls /lib/modules/*/kernel/drivers/input/rmi4 2>&1
-    echo "== kernel config"; zcat /proc/config.gz 2>/dev/null | grep -E 'RMI4|INPUT_TOUCHSCREEN|CONFIG_I2C' || echo "(no /proc/config.gz)"
+    echo "== kernel config"; zcat /proc/config.gz 2>/dev/null | grep -E 'RMI4|INPUT_TOUCHSCREEN|DYNAMIC_DEBUG' || echo "(no /proc/config.gz)"
+    echo "== touch re-probe log ($TOUT)"; cat "$TOUT" 2>&1
     echo "== dmesg (full)"; dmesg
   } > "$OUT.tmp" 2>&1
   mv -f "$OUT.tmp" "$OUT"
   sync
 }
-sleep 40; snap
-sleep 110; snap
+
+sleep 30; touch_debug
+snap
+sleep 90; snap
 exit 0
 EOF
 chmod 755 "$M/usr/local/sbin/pmos-diag"
@@ -107,7 +158,7 @@ EOF
   chmod 755 "$M/etc/init.d/pmos-growfs"
   cat > "$M/etc/init.d/pmos-diag" <<'EOF'
 #!/sbin/openrc-run
-description="Save boot diagnostics to /var/log/pmos-diag.txt"
+description="Touchscreen re-probe and boot diagnostics (/var/log/pmos-diag.txt)"
 depend() {
 	need localmount
 }
@@ -149,7 +200,7 @@ WantedBy=multi-user.target
 EOF
   cat > "$M/etc/systemd/system/pmos-diag.service" <<'EOF'
 [Unit]
-Description=Save boot diagnostics to /var/log/pmos-diag.txt
+Description=Touchscreen re-probe and boot diagnostics (/var/log/pmos-diag.txt)
 After=local-fs.target
 
 [Service]
