@@ -113,12 +113,12 @@ touch_debug() {
 # F12/F51 and a product ID TD4101 on this same bus, the mainline driver only gets F34/F1B/F04. This shows what the chip
 # returns for different access patterns. i2ctransfer prints the bytes it read as 0x.. 0x.. (an error text if it failed).
 raw_i2c() {
+  command -v i2ctransfer >/dev/null 2>&1 || { echo "(no i2ctransfer binary, raw test skipped)" >> "$TOUT"; return 0; }
   {
     echo
     echo "== raw i2c test at $(date), uptime $(cut -d' ' -f1 /proc/uptime) s"
     modprobe i2c-dev 2>&1 || true
     ls -la /dev/i2c-* 2>&1 || true
-    if ! command -v i2ctransfer >/dev/null 2>&1; then echo "(no i2ctransfer binary, raw test skipped)"; exit 0; fi
     [ -e "$DRV/$DEV" ] && echo "$DEV" > "$DRV/unbind"
     sleep 1
     T="i2ctransfer -f -y 3"
