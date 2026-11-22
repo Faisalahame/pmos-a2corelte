@@ -6,8 +6,8 @@
 #   * first boot grows the filesystem to the whole USERDATA partition (resize2fs, online)
 #   * sshd is switched on, and NetworkManager leaves the USB network (usb0) alone
 #   * a boot diagnostics log is written to /var/log/pmos-diag.txt (readable from TWRP, no PC or SSH needed)
-#   * touchscreen: the first probe of the Synaptics RMI4 chip fails at boot ("RMI initial reset failed",
-#     then a duplicate rmi4-00.fn34), so ~30 s after boot the driver is re-probed with debug output on
+#   * touchscreen: if the first probe of the Synaptics RMI4 chip fails at boot, ~30 s after boot the driver is
+#     re-probed (the kernel logs every PDT entry the chip lists, "pmos-a2corelte PDT")
 # usage: sudo bash scripts/fixup-rootfs.sh work/pmos-root.img
 set -euxo pipefail
 IMG="${1:?usage: fixup-rootfs.sh root.img}"
@@ -63,10 +63,11 @@ chmod 755 "$M/usr/local/sbin/pmos-growfs"
 # ---- boot diagnostics + touchscreen re-probe ----
 cat > "$M/usr/local/sbin/pmos-diag" <<'EOF'
 #!/bin/sh
-# 1) ~30 s after boot: if no touchscreen input device exists, re-probe the Synaptics RMI4 driver
-#    (3 tries, with dynamic debug on so the log shows what the chip answers). If a re-probe works,
-#    touch simply starts working.
-# 2) Saves boot diagnostics to /var/log/pmos-diag.txt so they can be read from TWRP.
+# 1) ~25 s after boot: first snapshot (so something is on disk even if the phone is rebooted early)
+# 2) ~30 s after boot: if no touchscreen input device exists, re-probe the Synaptics RMI4 driver (3 tries)
+#    and log what the kernel says. If a re-probe works, touch simply starts working.
+# 3) Saves boot diagnostics to /var/log/pmos-diag.txt so they can be read from TWRP.
+#    The whole run takes about 2.5 minutes: wait for it before rebooting to TWRP.
 OUT=/var/log/pmos-diag.txt
 TOUT=/var/log/pmos-touch-debug.txt
 DEV=3-004b
@@ -78,15 +79,6 @@ touch_debug() {
   {
     echo "== touch re-probe at $(date), uptime $(cut -d' ' -f1 /proc/uptime) s"
     if have_touch; then echo "touchscreen input device already present, nothing to do"; return 0; fi
-    mount -t debugfs none /sys/kernel/debug 2>/dev/null
-    DYN=/sys/kernel/debug/dynamic_debug/control
-    if [ -w "$DYN" ]; then
-      echo 'module rmi_core +p' > "$DYN"
-      echo 'module rmi_i2c +p' > "$DYN"
-      echo "dynamic debug enabled for rmi_core / rmi_i2c"
-    else
-      echo "(no dynamic_debug control file, CONFIG_DYNAMIC_DEBUG or debugfs missing)"
-    fi
     n=1
     while [ $n -le 3 ]; do
       echo "-- try $n: unbind/bind $DEV"
@@ -95,8 +87,9 @@ touch_debug() {
       sleep 1
       echo "$DEV" > "$DRV/bind"
       sleep 4
-      dmesg | sed -n "/MARK touch reprobe try $n/,\$p" | head -n 120
-      if have_touch; then echo "-- touchscreen input device appeared after try $n"; return 0; fi
+      dmesg | sed -n "/MARK touch reprobe try $n/,\$p" | grep -v '^\[[ 0-9.]*\]  ' | head -n 60
+      sync
+      if have_touch; then echo "-- touchscreen input device appeared after try $n"; sync; return 0; fi
       n=$((n+1))
       sleep 6
     done
@@ -106,7 +99,7 @@ touch_debug() {
     sleep 1
     modprobe rmi_i2c 2>&1
     sleep 5
-    dmesg | sed -n '/MARK touch module reload/,$p' | head -n 120
+    dmesg | sed -n '/MARK touch module reload/,$p' | grep -v '^\[[ 0-9.]*\]  ' | head -n 60
     if have_touch; then echo "-- touchscreen input device appeared after the module reload"; else echo "-- still no touchscreen input device"; fi
   } > "$TOUT" 2>&1
   sync
@@ -133,7 +126,8 @@ snap() {
   sync
 }
 
-sleep 30; touch_debug
+sleep 25; snap
+sleep 5; touch_debug
 snap
 sleep 90; snap
 exit 0

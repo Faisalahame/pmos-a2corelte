@@ -10,7 +10,7 @@
 # exynos7870 kernel) and copy the old a2corelte boot.img settings (offsets, page size, cmdline,
 # dtb, mkbootimg/dtbtool) from pmaports git history into it.
 #
-# TOUCHSCREEN: the kernel is built FROM SOURCE with two small touchscreen changes (see "touchscreen" below).
+# TOUCHSCREEN: the kernel is built FROM SOURCE with small touchscreen changes (see "touchscreen" below).
 #
 # env: UI = postmarketOS user interface (default phosh)
 set -euxo pipefail
@@ -151,15 +151,17 @@ fi
 
 # ---- touchscreen ----
 # The A2 Core touchscreen is a Synaptics TD4101 (touch + display driver in one chip) on I2C address 0x4b, used with the
-# kernel's RMI4 driver (devicetree: syna,rmi4-i2c). The stock (TWRP) driver never resets the chip; the mainline driver
-# sends a reset command right away.
-# Result on the phone (pmos-diag): "RMI initial reset failed", then a duplicate rmi4-00.fn34 (the chip answers like
-# one in bootloader mode) and no touch input device. So the kernel is built from source with two changes:
+# kernel's RMI4 driver (devicetree: syna,rmi4-i2c). The stock (TWRP) driver never resets the chip and works fine with it
+# (TWRP log: "Device status[0x81] status.code[1]", F12 and F51 found, product ID TD4101).
+# On postmarketOS (6.15 mainline RMI4 core) the probe dies in rmi_create_function(): the chip's PDT lists F34 twice, the
+# second one fails with -EEXIST ("sysfs: cannot create duplicate filename .../rmi4-01.fn34") and no touch input device
+# is created. Changes, all made at the END of prepare() of the kernel package:
 #   1. devicetree: syna,startup-delay-ms / syna,reset-delay-ms = 500 ms on the touchscreen node
 #      (the stock devicetree ALREADY has both properties, so the old lines are removed first, otherwise dtc fails
-#      with "Duplicate property name"; the old values are printed to the log)
+#      with "Duplicate property name")
 #   2. rmi_driver.c: no initial reset command (just a 500 ms wait), like the stock Samsung driver
-# The kernel package (linux-postmarketos-exynos7870) gets a small block at the END of its prepare() that does this
+#   3. rmi_driver.c, rmi_create_function(): a PDT entry whose function number was already created is skipped, and every
+#      PDT entry is logged with dev_info (this kernel has no dynamic debug), so dmesg shows what the chip lists
 # (the devicetree sources are only copied into the kernel tree at the end of prepare()).
 KDIR=$(find "$PMAPORTS" -maxdepth 4 -type d -name linux-postmarketos-exynos7870 | head -n1 || true)
 KCFG=""
@@ -208,6 +210,25 @@ cat > work/touch-inject.sh <<'EOS'
 	grep -q 'rmi_scan_pdt(rmi_dev, NULL, rmi_initial_reset)' "$_touch_rd" || { echo "pmos-a2corelte touch fix: ERROR rmi_initial_reset call not found in $_touch_rd"; return 1; }
 	sed -i 's|retval = rmi_scan_pdt(rmi_dev, NULL, rmi_initial_reset);|msleep(500); retval = 0; /* pmos-a2corelte: no initial reset, like the stock driver */|' "$_touch_rd"
 	grep -q '<linux/delay.h>' "$_touch_rd" || sed -i '0,/#include <linux\/module.h>/s||#include <linux/module.h>\n#include <linux/delay.h>|' "$_touch_rd"
+	# rmi_create_function(): log every PDT entry and skip a function number that already exists (F34 is listed twice)
+	grep -qF 'fn = kzalloc(sizeof(struct rmi_function) +' "$_touch_rd" || { echo "pmos-a2corelte touch fix: ERROR rmi_create_function anchor not found in $_touch_rd"; return 1; }
+	cat > "$srcdir/pmos-dedupe.inc" <<-'EOC'
+		{
+		static int pm_log;
+		struct rmi_driver_data *pm_data = dev_get_drvdata(&rmi_dev->dev);
+		struct rmi_function *pm_old;
+		bool pm_dup = false;
+		list_for_each_entry(pm_old, &pm_data->function_list, node)
+			if (pm_old->fd.function_number == pdt->function_number)
+				pm_dup = true;
+		if (pm_log++ < 40)
+			dev_info(&rmi_dev->dev, "pmos-a2corelte PDT: F%02X v%u page 0x%04x query 0x%02x cmd 0x%02x ctrl 0x%02x data 0x%02x irqs %u%s\n", pdt->function_number, pdt->function_version, pdt->page_start, pdt->query_base_addr, pdt->command_base_addr, pdt->control_base_addr, pdt->data_base_addr, pdt->interrupt_source_count, pm_dup ? " (duplicate, skipped)" : "");
+		if (pm_dup)
+			return RMI_SCAN_CONTINUE;
+		}
+	EOC
+	awk -v f="$srcdir/pmos-dedupe.inc" 'index($0, "fn = kzalloc(sizeof(struct rmi_function) +") && !d { while ((getline l < f) > 0) print l; close(f); d=1 } { print }' "$_touch_rd" > "$_touch_rd.new" && mv "$_touch_rd.new" "$_touch_rd"
+	grep -q 'pmos-a2corelte PDT' "$_touch_rd" || { echo "pmos-a2corelte touch fix: ERROR the PDT block was not inserted into $_touch_rd"; return 1; }
 	grep -n 'pmos-a2corelte\|linux/delay.h' "$_touch_rd"
 	# ---- pmos-a2corelte touch fix end ----
 EOS
