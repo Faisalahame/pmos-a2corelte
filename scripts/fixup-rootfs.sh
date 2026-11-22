@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Prepares the pmOS root image for the way the Galaxy A2 Core boots it (run as root):
+#   * ext4 features TWRP's old 3.18 kernel cannot read are switched off (metadata_csum_seed, metadata_csum),
+#     so the root can be mounted from TWRP to read the diagnostics log
 #   * our tiny initramfs mounts the root itself, so /etc/fstab must not ask for /boot or a root label
 #   * first boot grows the filesystem to the whole USERDATA partition (resize2fs, online)
 #   * sshd is switched on, and NetworkManager leaves the USB network (usb0) alone
@@ -12,6 +14,20 @@ cleanup() { mountpoint -q "$M" && umount "$M"; rmdir "$M" 2>/dev/null || true; }
 trap cleanup EXIT
 
 e2fsck -fy "$IMG" || [ $? -le 1 ]
+
+# ---- ext4 features for TWRP's old kernel ----
+# TWRP on this phone refuses the pmbootstrap image: "unsupported optional features (2000)" = metadata_csum_seed.
+# metadata_csum is switched off too: the old kernel can corrupt a filesystem that has it (seen with the Kali image).
+echo "== ext4 features before =="; dumpe2fs -h "$IMG" 2>/dev/null | grep -i '^Filesystem features' || true
+tune2fs -O ^metadata_csum_seed "$IMG" || echo "WARN: could not clear metadata_csum_seed"
+tune2fs -O ^metadata_csum "$IMG" || echo "WARN: could not clear metadata_csum"
+e2fsck -fyD "$IMG" || [ $? -le 1 ]
+echo "== ext4 features after =="; dumpe2fs -h "$IMG" 2>/dev/null | grep -i '^Filesystem features'
+if dumpe2fs -h "$IMG" 2>/dev/null | grep -i '^Filesystem features' | grep -q 'metadata_csum_seed'; then
+  echo "ERROR: metadata_csum_seed is still set, TWRP will not be able to mount the root"
+  exit 1
+fi
+
 mount -o loop,rw "$IMG" "$M"
 
 echo "== init system in the image =="
