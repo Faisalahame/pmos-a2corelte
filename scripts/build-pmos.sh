@@ -163,11 +163,15 @@ fi
 #   2. rmi_driver.c: no initial reset command (just a 500 ms wait), like the stock Samsung driver
 #   3. rmi_driver.c, rmi_create_function(): a PDT entry whose function number was already created is skipped, and every
 #      PDT entry is logged with dev_info (this kernel has no dynamic debug), so dmesg shows what the chip lists
+#   4. rmi_i2c.c: THE REAL FIX (see "rmi_i2c.c" below): page select + register access in ONE i2c transfer, like the
+#      stock driver. Without it every page reads the same table.
 # (the devicetree sources are only copied into the kernel tree at the end of prepare().)
 # Run of 17:52 (commit 77351b4): the duplicate skip works, but the chip's table lists only F34, F1B and F04 (the same three
 # entries on pages 0 to 12) and no F01/F12, so the probe stops with "Missing F01 container". The stock driver reads F12/F51
-# fine on the same bus. So the boot diagnostics now also read the chip's registers raw with i2ctransfer (i2c-tools) and
-# the kernel gets CONFIG_I2C_CHARDEV (/dev/i2c-3).
+# fine on the same bus. Cause: mainline sends the page select (0xff) as its own i2c transaction, which the TD4101 ignores;
+# the stock driver sends [0xff,page] + [reg] + read as one transfer with repeated starts. That is change 4.
+# The boot diagnostics also read the chip's registers raw with i2ctransfer (i2c-tools) and the kernel gets
+# CONFIG_I2C_CHARDEV (/dev/i2c-3).
 KDIR=$(find "$PMAPORTS" -maxdepth 4 -type d -name linux-postmarketos-exynos7870 | head -n1 || true)
 KCFG=""
 if [ -n "$KDIR" ]; then
@@ -244,6 +248,25 @@ cat > work/touch-inject.sh <<'EOS'
 	# ---- pmos-a2corelte touch fix end ----
 EOS
 
+# ---- rmi_i2c.c: page select + access in ONE i2c transfer (change 4, the real fix for the missing F01) ----
+# Patch against the 6.15 drivers/input/rmi4/rmi_i2c.c, embedded as gzip+base64 (plain ASCII: no tab/space problems).
+# It is unpacked here, checked against its sha256, and the same text goes into prepare() where it is applied with patch -p1.
+# If it does not apply, prepare() fails within the first minutes of the kernel build (no 30 minute wait).
+RMI_I2C_PATCH_SHA=18788d7b2196a310afda9a87d5152ec07d9e9e56ec3dabad5e11bc3a9b92ad65
+RMI_I2C_PATCH_B64='H4sIAAAAAAACA91YbW/bRhL+LP2KqQvnSIuUSVnWKfbZTZroAgPt2ZB0wF17BbESlxJhvgjclSUn8H/vzCxJS7KcuEVaHBogFnd3dt7n2Z0N4ygC153FGsRxWMR3slDHcbZY6uMijbv0J4g70/YUJp9dbsZZKNdwMvWmp1HY7bbb3al4fRL2Oqfge16v2226rvsFGc1Wq/UlOW/egNvtOSen0MIfvwc4oXSxnGooiYL1Ii80fGrCt6GM4kzC8Mer4KrzLrh5+2FgiTAsbLCs8uPyEvo2vAJvHUV2E5pwfNR04YiZKamDhZhJcGEkNbEBGvL6G5ZyBuO5hEUeZ1oWoHPQOKStuhCZIooglHelgmYfcTDbMrlifkCaSKXazRYSkBTcE0+lgrm4k+D33AmFxxDF2cyByVIDGgR5ltzDVBRFjMR9JivkLFaoDPPKowhtUA4oo9lysUA1S04wudcSYgUCDkiNA1gVsdYyIzsqNuyXdhPAeOWlyqk8lSidhdauYA5xukhkKjMtdJxnCqwkvpUw+vH7pbKNPcy3v8O2DaOcpdf7FbMTWx4EoVlhEi0xh+7NKlq/kuinDM1KYjFJ5NYuaViZDZ3TXm08RsQtDecw454gXWrM8ySf3kK6VBomEuYyCWE1J8fN0Z3RMpuSbeRaSXkhw0c+Q6mXBZr9URY5mgtqOUVfYoSyPHOryUjEybKQJh+uM/biB5GI9T287cC7vJB/UzC6z8RCx1MF4/dd3/MrVyiZSCwGhaJBKIi1gnyVMStKGY6GMApaMgvRtxBnuHk0vr6x0fkKVQEZRcjkbNOJhRQh5oxAw1Ef5qcERlmTPzE8IlXLbIaKhSgOE16KFEwlO+iceDqHVV7cKrKP3bSY55l0SM9QMTdduri0wDG1VOWhSWUQWcjzodCC9L7+18CYFCHNKtZzZlXIhRRahlh4okAH0C60ikx0IMqL0i7Bvm/DezR4jT7B5CPebNZcUgAw74+brqJknaI4vQUL1l7cOSqHDiz7bI/ddD813UZJTITTJKboHJW/FxUH99LMnCM5btbryTL6ufMLEnwiCCP4CkaDHwbvxsFw8OFqNB4MHRbxQDtYPanvRIIjHJtv3EwiU0FeDMjblhHiGP4YgfijzCOLR7bNnCKwyt3fXOysA9nSQAwIZFFYrwwv9xInHFpoHByqM6BIcSgpk2V4Bodh+8CBIKDaCAKn1JOFkZ5YErXEf4Bnw3clBZyBO7i6JroHY1TlKWZ/wVLOjbHExMPvh2ZrF/iHg/HwajCCEwL4nWiSdwj4ZDChqt4M6jaIH3F8Max46BByOE1Ae8H8myKWabjL4xCOaq8GGhKZ2Xxm9U+cv0Or13V8zxxZX1EJFK4F2lsEGKeSYF9uOsA/6Hb4bemI5MYcvQ7oC2nQMGiBf95sNco8D0y20swG81TNAP8rXoGtJG3xSBf35xSWBiNrwOa/2gqzwVzSmj3pe+hE9GW/75x8dV/WgtFSssej6qPF8opANqQynS7urR1S8gYdfhh7Cjppayppz+3jmw0fM0SYqqordgtlajx5ysgU0GO52lyCs1wToMWaXFxHhi15Dka2KP2KclsY0iAVx9L7pc0+uYCq/ml4vrEcJWKmcN3bnKScqfGkEmdvUpAfL+psqlf8z8vz98nzK3llzm4uGDE7ATT20elgYU4yL0pOBKQdGOHpVouC1mpsw2x1FFmPeuIhTUcgiXbg7XD49r/B6OqngUUTNhu/ibcXF09piKQxwQP1lqlTlUi5sDoe1/HDy7B+x1an8sou3l/U/iKxX1CsdMAOJO/LHNjwE2F0QyYK756P7C9xniQ+wN4Vus1vsDBnAlITcFCmn5WlG05mXG/vB9//+0Pwn5vr4diB7UOKIeTEd15Dy+/06w7iCYTQfef3IMhnLwVw8afg9S4m0w0Cnr9C7EGoB5KJTGgUlHevJ0D4HJjvxX9WgvKF/zS4oBvbBe2YFSzbxlOYKBfxs/GIEDz5wIcgZ8gzbOEJ2w277DInuq8dn5Li9IR+v2pSvPB0+384L/4C+Pc7lHBfoMMfBIZwfFR1gdxsfEVodH8jNCKfA8pwOPwY8usAN9SH33q9NV3hwTo8Wszt/2UHTIr15JgEL0HAAQtrxeZ5c7BTXXXwutaDVsfr4wV4f1UtinxSd1NPEc7eRlXz/hAsEqExWdOAW8GSNFjwiFG2YdqUGdUF0tLCVr+yCav70boC0lD/7D9eX7HvyQtzZa1RnR5F0uD2o0iwwre7ogpx9kkqoafT8x2/iz7q9Z4/j17gJJolGDAzbPDO+W8bvemNq4F98khqTQ8AdeuNQMCPEKs4ScASNqTiFhviZSGZ5mY0pFcNei8wDG4zbPZZW2zlqcu2Jpt7ylcXLZLb6nHMRK+NnuXXEGHa+SgusH26eT+mFxN+zdLzIl/O5rw6zdMJHpch6+iWDxwLoeclmzG9J5hpZezwsC8u8jvk86wKRt8knynznkGMCrEq817lIGAijMhjfuNgPhN6npBkciHi2VyTL8JUqlkb3VrWL+XHs6DsMeRt0uycK4+nQ3mOeGvPk68dSsM6mfDb5vwlNGBmn2vM4eCf3IeTA+rWvHQjTnlY0QaIv7i7qAKGoSJIICwwBVHjGrXhVYkgCrWYaZxF+S5Xija/15F5yAyxhdkxiGzYyZaXifscr+qZiJIZ4dbFG1aG1tELkMxUXhgLofkrXAAXBO8WAAA='
+printf '%s' "$RMI_I2C_PATCH_B64" | base64 -d | gunzip > work/rmi-i2c.patch
+echo "$RMI_I2C_PATCH_SHA  work/rmi-i2c.patch" | sha256sum -c -
+{
+  printf '\t# rmi_i2c.c: page select + register access in ONE i2c transfer, like the stock Samsung driver\n'
+  printf "\techo '%s' | base64 -d | gunzip > \"\$srcdir/pmos-rmi-i2c.patch\"\n" "$RMI_I2C_PATCH_B64"
+  printf '\tpatch -p1 -i "$srcdir/pmos-rmi-i2c.patch" || { echo "pmos-a2corelte touch fix: ERROR the rmi_i2c.c patch did not apply"; return 1; }\n'
+  printf '\tgrep -q RMI_I2C_RETRIES drivers/input/rmi4/rmi_i2c.c || { echo "pmos-a2corelte touch fix: ERROR rmi_i2c.c was not patched"; return 1; }\n'
+  printf '\techo "pmos-a2corelte touch fix: rmi_i2c.c patched (combined page select)"\n'
+} > work/touch-inject-i2c.sh
+awk -v f=work/touch-inject-i2c.sh '/# ---- pmos-a2corelte touch fix end ----/ { while ((getline l < f) > 0) print l; close(f) } { print }' work/touch-inject.sh > work/touch-inject.sh.new \
+  && mv work/touch-inject.sh.new work/touch-inject.sh
+grep -c 'RMI_I2C_RETRIES' work/touch-inject.sh
+
 if grep -q 'pmos-a2corelte touch fix begin' "$KDIR/APKBUILD"; then
   echo "touchscreen patch already in the kernel APKBUILD"
 elif grep -q '^prepare()' "$KDIR/APKBUILD"; then
@@ -259,7 +282,7 @@ grep -q 'pmos-a2corelte touch fix begin' "$KDIR/APKBUILD" || { echo "ERROR: coul
 sed -i 's/^pkgrel=.*/pkgrel=99/' "$KDIR/APKBUILD"
 pmbootstrap -y checksum linux-postmarketos-exynos7870
 echo "===== kernel prepare() after the touchscreen patch ====="
-sed -n '/^prepare()/,/^}/p' "$KDIR/APKBUILD"
+sed -n '/^prepare()/,/^}/p' "$KDIR/APKBUILD" | cut -c1-300
 
 pmbootstrap config || true
 
