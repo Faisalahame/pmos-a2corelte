@@ -3,6 +3,7 @@
 #   * our tiny initramfs mounts the root itself, so /etc/fstab must not ask for /boot or a root label
 #   * first boot grows the filesystem to the whole USERDATA partition (resize2fs, online)
 #   * sshd is switched on, and NetworkManager leaves the USB network (usb0) alone
+#   * a boot diagnostics log is written to /var/log/pmos-diag.txt (readable from TWRP, no PC or SSH needed)
 # usage: sudo bash scripts/fixup-rootfs.sh work/pmos-root.img
 set -euxo pipefail
 IMG="${1:?usage: fixup-rootfs.sh root.img}"
@@ -17,6 +18,8 @@ echo "== init system in the image =="
 ls -la "$M/sbin/init" || true
 ls -d "$M/usr/lib/systemd/system" "$M/lib/systemd/system" "$M/etc/init.d" 2>/dev/null || true
 ls "$M/usr/sbin/resize2fs" "$M/sbin/resize2fs" 2>/dev/null || echo "WARN: resize2fs not in the image, the filesystem will not grow by itself"
+echo "== touchscreen modules in the image =="
+ls "$M"/lib/modules/*/kernel/drivers/input/rmi4 2>&1 || echo "(no rmi4 modules on disk: built into the kernel, or missing)"
 
 # ---- fstab ----
 cat > "$M/etc/fstab" <<'EOF'
@@ -25,7 +28,7 @@ cat > "$M/etc/fstab" <<'EOF'
 EOF
 
 # ---- first-boot filesystem grow ----
-install -d "$M/usr/local/sbin" "$M/var/lib"
+install -d "$M/usr/local/sbin" "$M/var/lib" "$M/var/log"
 cat > "$M/usr/local/sbin/pmos-growfs" <<'EOF'
 #!/bin/sh
 # Grow the root filesystem to the whole partition, once (first boot).
@@ -38,6 +41,37 @@ if resize2fs "$DEV"; then touch "$DONE"; fi
 exit 0
 EOF
 chmod 755 "$M/usr/local/sbin/pmos-growfs"
+
+# ---- boot diagnostics: /var/log/pmos-diag.txt, rewritten 40 s and 150 s after every boot ----
+cat > "$M/usr/local/sbin/pmos-diag" <<'EOF'
+#!/bin/sh
+# Saves boot diagnostics to /var/log/pmos-diag.txt so they can be read from TWRP
+# when the screen or the touchscreen does not work.
+OUT=/var/log/pmos-diag.txt
+snap() {
+  {
+    echo "== pmos-diag at $(date), uptime $(cut -d' ' -f1 /proc/uptime) s"
+    uname -a
+    echo "== input devices"; cat /proc/bus/input/devices
+    echo "== touch / rmi / i2c lines of dmesg"; dmesg | grep -iE 'rmi|synap|touch|i2c|input'
+    echo "== loaded modules"; lsmod
+    echo "== i2c devices"
+    for d in /sys/bus/i2c/devices/*; do
+      [ -e "$d" ] || continue
+      echo "$d name=$(cat "$d/name" 2>/dev/null) driver=$(readlink "$d/driver" 2>/dev/null)"
+    done
+    echo "== rmi modules on disk"; ls /lib/modules/*/kernel/drivers/input/rmi4 2>&1
+    echo "== kernel config"; zcat /proc/config.gz 2>/dev/null | grep -E 'RMI4|INPUT_TOUCHSCREEN|CONFIG_I2C' || echo "(no /proc/config.gz)"
+    echo "== dmesg (full)"; dmesg
+  } > "$OUT.tmp" 2>&1
+  mv -f "$OUT.tmp" "$OUT"
+  sync
+}
+sleep 40; snap
+sleep 110; snap
+exit 0
+EOF
+chmod 755 "$M/usr/local/sbin/pmos-diag"
 
 # OpenRC
 if [ -d "$M/etc/init.d" ]; then
@@ -55,8 +89,22 @@ start() {
 }
 EOF
   chmod 755 "$M/etc/init.d/pmos-growfs"
+  cat > "$M/etc/init.d/pmos-diag" <<'EOF'
+#!/sbin/openrc-run
+description="Save boot diagnostics to /var/log/pmos-diag.txt"
+depend() {
+	need localmount
+}
+start() {
+	ebegin "Saving boot diagnostics"
+	start-stop-daemon --start --background --exec /usr/local/sbin/pmos-diag
+	eend 0
+}
+EOF
+  chmod 755 "$M/etc/init.d/pmos-diag"
   mkdir -p "$M/etc/runlevels/default"
   ln -sf /etc/init.d/pmos-growfs "$M/etc/runlevels/default/pmos-growfs"
+  ln -sf /etc/init.d/pmos-diag "$M/etc/runlevels/default/pmos-diag"
   # sshd
   if [ -e "$M/etc/init.d/sshd" ]; then
     ln -sf /etc/init.d/sshd "$M/etc/runlevels/default/sshd"
@@ -83,7 +131,20 @@ RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
 EOF
+  cat > "$M/etc/systemd/system/pmos-diag.service" <<'EOF'
+[Unit]
+Description=Save boot diagnostics to /var/log/pmos-diag.txt
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/pmos-diag
+
+[Install]
+WantedBy=multi-user.target
+EOF
   ln -sf /etc/systemd/system/pmos-growfs.service "$M/etc/systemd/system/multi-user.target.wants/pmos-growfs.service"
+  ln -sf /etc/systemd/system/pmos-diag.service "$M/etc/systemd/system/multi-user.target.wants/pmos-diag.service"
   for u in sshd.service ssh.service; do
     if [ -e "$M/$SD/$u" ]; then
       ln -sf "/$SD/$u" "$M/etc/systemd/system/multi-user.target.wants/$u"
