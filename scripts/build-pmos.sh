@@ -180,16 +180,17 @@ fi
 if [ -n "$KCFG" ]; then
   echo "===== kernel config: $KCFG ====="
   grep -E 'RMI4|INPUT_TOUCHSCREEN|^CONFIG_I2C=|I2C_S3C|I2C_EXYNOS' "$KCFG" | tee work/kernel-touch-config.log || true
-  if grep -qE '^CONFIG_RMI4_I2C=[ym]' "$KCFG" && grep -qE '^CONFIG_RMI4_F12=[ym]' "$KCFG"; then
-    echo "RMI4 touchscreen drivers are already enabled in the kernel config"
-  else
-    echo "RMI4 touchscreen drivers are MISSING from the kernel config -> enabling them"
-    for o in INPUT_TOUCHSCREEN RMI4_CORE RMI4_I2C RMI4_F01 RMI4_F11 RMI4_F12; do
-      sed -i "/^CONFIG_${o}=/d;/^# CONFIG_${o} is not set/d" "$KCFG"
-    done
-    echo >> "$KCFG"
-    printf '%s\n' CONFIG_INPUT_TOUCHSCREEN=y CONFIG_RMI4_CORE=y CONFIG_RMI4_I2C=y CONFIG_RMI4_F01=y CONFIG_RMI4_F11=y CONFIG_RMI4_F12=y >> "$KCFG"
-  fi
+  # TEST BUILD (timing): the RMI4 touch driver is built INTO the kernel (=y) instead of a module. As a module it is loaded
+  # by userspace at about 5.9 s and first reads the chip at 6.4 s (chip already answers with a fixed byte stream, with or
+  # without the driver loaded); Samsung's driver first reads the chip at about 3.5 s and gets a normal register map.
+  # Built in, the first read happens right after the I2C bus comes up (about 2.3 s), so the "PDT at 0x00e9" line in dmesg
+  # shows whether the chip is in register mode that early.
+  for o in INPUT_TOUCHSCREEN RMI4_CORE RMI4_I2C RMI4_F01 RMI4_F11 RMI4_F12; do
+    sed -i "/^CONFIG_${o}=/d;/^# CONFIG_${o} is not set/d" "$KCFG"
+  done
+  echo >> "$KCFG"
+  printf '%s\n' CONFIG_INPUT_TOUCHSCREEN=y CONFIG_RMI4_CORE=y CONFIG_RMI4_I2C=y CONFIG_RMI4_F01=y CONFIG_RMI4_F11=y CONFIG_RMI4_F12=y >> "$KCFG"
+  grep -E 'RMI4|INPUT_TOUCHSCREEN' "$KCFG" | tee -a work/kernel-touch-config.log || true
   # /dev/i2c-N, so the boot diagnostics can read the touchscreen chip raw with i2ctransfer
   if ! grep -qE '^CONFIG_I2C_CHARDEV=[ym]' "$KCFG"; then
     sed -i '/^CONFIG_I2C_CHARDEV=/d;/^# CONFIG_I2C_CHARDEV is not set/d' "$KCFG"
