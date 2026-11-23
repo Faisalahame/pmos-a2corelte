@@ -17,6 +17,10 @@ kernel package is built from mainline 6.19.x instead of 6.15:
   4. kernel config: TDDI panel + backlight on; "make olddefconfig" for the new kernel
   5. prepare() checks that panel node, panel driver, DSI, MIPI PHY and DECON support are really in the tree, else it fails
      within minutes
+  6. (run of 23:12) the old patch set's battery fuel gauge driver s2mu005_fg.c does not compile on 6.19 (struct
+     power_supply_config has no of_node any more): prepare() rewrites power_supply_config.of_node -> fwnode
+  7. the kernel build runs with "make -k": it keeps compiling after an error, so ONE run lists ALL compile errors
+     (work/pmb-compile-errors.log) instead of one error per 25 minute run
 The touchscreen fixes (rmi4 changes) stay as they were.
 """
 import sys
@@ -80,6 +84,7 @@ rep("\\t\\tcp \\"$dts\\" \\"arch/arm64/boot/dts/exynos/\\"\\n", "\\n".join([
  "\\t\\t\\tcontinue",
  "\\t\\tfi",
  "\\t\\tcp \\"$dts\\" \\"arch/arm64/boot/dts/exynos/\\"", ""]))
+rep("\\tunset LDFLAGS\\n", "\\tunset LDFLAGS\\n\\texport MAKEFLAGS=\\"$MAKEFLAGS -k\\"\\n")
 open(p, "w").write(t)
 print("kernel APKBUILD: mainline", os.environ["KPKGVER"], "with tolerant patching")
 PYEOF
@@ -121,6 +126,35 @@ rep(
 )
 assert "6.15-r99" in s
 s = s.replace("6.15-r99", "${KPKGVER}-r99")
+
+# ---- 5. 6.19 API fix: struct power_supply_config lost its of_node member (use fwnode) ----------------------------
+# The old exynos7870 patch set adds drivers (s2mu005_fg.c = battery fuel gauge) written for 6.15; they apply but do not compile.
+rep(
+    """	make ARCH="$_carch" LLVM=1 olddefconfig
+""",
+    r"""	# 6.19: struct power_supply_config has no of_node any more -> fwnode (fixes s2mu005_fg.c from the old patch set)
+	for _f in drivers/power/supply/*.c; do
+		grep -q 'struct power_supply_config' "$_f" || continue
+		perl -0pi -e 'my %v; while (/struct[[:space:]]+power_supply_config[[:space:]]+[*]?[[:space:]]*([A-Za-z0-9_]+)/g) { $v{$1} = 1; } foreach my $n (keys %v) { s/(?<![A-Za-z0-9_])$n([.]|->)of_node[[:space:]]*=[[:space:]]*([^;]+);/$n${1}fwnode = of_fwnode_handle($2);/g; }' "$_f"
+		if grep -q 'of_fwnode_handle' "$_f" && ! grep -q '<linux/of.h>' "$_f"; then
+			sed -i '0,/^#include </s||#include <linux/of.h>\n#include <|' "$_f"
+		fi
+		echo "pmos-a2corelte kernel: power_supply of_node->fwnode check $_f: $(grep -c 'fwnode = of_fwnode_handle' "$_f") fixed, $(grep -c '[.>]of_node' "$_f") of_node left"
+	done
+	make ARCH="$_carch" LLVM=1 olddefconfig
+""",
+)
+
+# ---- 6. keep going after a compile error (make -k is set in the APKBUILD) and list ALL errors when the build fails -----
+rep(
+    """| tail -n 40 | cut -c1-300 | tee work/pmb-kernel-errors.log || true
+""",
+    """| tail -n 40 | cut -c1-300 | tee work/pmb-kernel-errors.log || true
+  { grep -aE 'pmos-a2corelte (kernel|display)' "$WORK/log.txt" 2>/dev/null | sort -u | head -n 40
+    grep -aE ' error: |undefined reference|ld.lld: error|Error 1$' "$WORK/log.txt" 2>/dev/null | sort -u | head -n 60; } \\
+    | cut -c1-300 | tee work/pmb-compile-errors.log || true
+""",
+)
 
 open(P, "w").write(s)
 print("scripts/build-pmos.sh patched for the display backport (kernel %s)" % KPKGVER)
