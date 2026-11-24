@@ -49,12 +49,37 @@ usb_gadget() {
 if usb_gadget; then echo "[pmos-rd] USB gadget up (172.16.42.1)"; else echo "[pmos-rd] USB gadget FAILED"; fi
 cd /
 
+# kernel log lines for the on-screen pages: no timestamp, cut to the screen width
+klog() { dmesg 2>&1 | grep -iE "$1" | sed 's/^\[ *[0-9.]*\] //' | tail -n 28 | cut -c1-54; }
+
+# Shows 4 pages in a loop (photograph each one). Page 1: partitions + what exists; 2: storage/power lines of the
+# kernel log; 3: USB lines; 4: devices that are still waiting for a driver or a resource, and probe errors.
 fail() {
-  echo "[pmos-rd] ERROR: $1"
-  echo "---- /proc/partitions"; cat /proc/partitions
-  echo "---- blkid"; blkid
-  echo "[pmos-rd] halting here so you can read this (photo the screen)"
-  while true; do sleep 60; done
+  mount -t debugfs none /sys/kernel/debug 2>/dev/null
+  while true; do
+    printf '\033c'
+    echo "[pmos-rd] ERROR: $1"
+    echo "(page 1/4, kernel $(uname -r))"
+    echo "---- /proc/partitions"; cat /proc/partitions
+    echo "---- blkid"; blkid
+    echo "---- mmc_host: $(ls /sys/class/mmc_host 2>&1)"
+    echo "---- udc: $(ls /sys/class/udc 2>&1)"
+    echo "---- block: $(ls /sys/block 2>&1 | tr '\n' ' ')"
+    sleep 20
+    printf '\033c'
+    echo "[pmos-rd] page 2/4: mmc / regulator / pmic / clk"
+    klog 'mmc|dwmmc|dw_mmc|regulator|s2mp|pmic|cmu|clk'
+    sleep 25
+    printf '\033c'
+    echo "[pmos-rd] page 3/4: usb / phy / dwc3"
+    klog 'dwc3|usb|phy|udc|role'
+    sleep 25
+    printf '\033c'
+    echo "[pmos-rd] page 4/4: deferred + errors"
+    echo "-- devices_deferred:"; head -n 12 /sys/kernel/debug/devices_deferred 2>&1 | cut -c1-54
+    echo "-- errors:"; klog 'fail|error|defer|-517|-22|-19|-2 ' | tail -n 14
+    sleep 25
+  done
 }
 
 # block device of the partition named USERDATA (read from sysfs, there is no by-name directory in the initramfs)
