@@ -218,6 +218,21 @@ else
   echo "WARN: no /etc/init.d: not an OpenRC image"
 fi
 
+# ---- greetd: keep trying until the display exists ----
+# The display driver (exynos-drm) only finishes probing about 27 s after boot, but greetd starts at about 13 s. Its greeter
+# (phrog on phoc) finds no screen and exits, and nothing restarts it, so the phone stays on the boot splash (spinning circle).
+# Supervised with unlimited restarts every 3 s, greetd comes up as soon as the screen is there.
+if [ -f "$M/etc/init.d/greetd" ]; then
+  GCONF="$M/etc/conf.d/greetd"
+  touch "$GCONF"
+  sed -i '/^[[:space:]]*supervisor=/d;/^[[:space:]]*respawn_delay=/d;/^[[:space:]]*respawn_max=/d;/^[[:space:]]*respawn_period=/d;/^# pmos-a2corelte: restart greetd/d' "$GCONF"
+  printf '\n# pmos-a2corelte: restart greetd until the display (exynos-drm, about 27 s after boot) is ready\nsupervisor=supervise-daemon\nrespawn_delay=3\nrespawn_max=0\n' >> "$GCONF"
+  grep -q '^cfgfile=' "$GCONF" || echo "WARN: no cfgfile= line in /etc/conf.d/greetd (the package default is used)"
+  echo "greetd supervised, /etc/conf.d/greetd:"; cat "$GCONF"
+else
+  echo "WARN: /etc/init.d/greetd does not exist in the image"
+fi
+
 sync
 umount "$M"
 e2fsck -fn "$IMG"
