@@ -48,7 +48,7 @@ block = "\n".join([
     T + r'''perl -0pi -e 's/(gpiod_set_value_cansleep\(ctx->reset_gpio, 0\);\n)\tusleep_range\(10000, 11000\);/$1\tmsleep(130);\n\tdev_info(dev, "pmos-a2corelte: TD4101 reset done\\n");/' "$_tddi"''',
     T + r"""grep -q 'GPIOD_OUT_LOW' "$_tddi" || { echo "pmos-a2corelte panel reset: ERROR reset gpio flag was not changed in $_tddi"; return 1; }""",
     T + r"""grep -q 'msleep(130)' "$_tddi" || { echo "pmos-a2corelte panel reset: ERROR the 130 ms wait was not added to $_tddi"; return 1; }""",
-    T + r"""grep -n 'reset-gpios' "$_dts"; grep -n 'reset_gpio\|msleep(130)\|TD4101 reset' "$_tddi"""",
+    T + r'''grep -n 'reset-gpios' "$_dts"; grep -n 'reset_gpio\|msleep(130)\|TD4101 reset' "$_tddi"''',
     T + 'echo "pmos-a2corelte panel reset: reset-gpios gpd3-4 on the td4101 panel, 130 ms wait after the reset"',
     T + "# ---- pmos-a2corelte panel reset end ----",
 ]) + "\n"
