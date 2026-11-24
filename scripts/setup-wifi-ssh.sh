@@ -2,10 +2,10 @@
 # Makes the phone join your mobile hotspot on boot and run sshd, so you can SSH in from Termux (no PC needed).
 #   * NetworkManager profile for the hotspot (SSID / password below), autoconnect
 #   * sshd + networkmanager + dbus switched on (OpenRC), password login allowed
-#   * pmos-wifi service: un-blocks Wi-Fi, retries "nmcli connection up" for about 2 minutes after boot and writes
-#     /var/log/pmos-wifi.txt (IP address, interface, Wi-Fi driver / firmware lines): readable from TWRP, no SSH needed
-#   * the same service prints a one-line Wi-Fi status on the phone screen (/dev/tty1) every 8 s for about 6 minutes:
-#     interface, state, IP address, whether the hotspot is visible, NetworkManager / sshd running
+#   * pmos-wifi service: un-blocks Wi-Fi, reloads the brcmfmac driver if no wlan interface showed up (the first load
+#     fails on kernel 6.19 while Bluetooth loads its firmware), retries "nmcli connection up" for about 2 minutes and
+#     writes /var/log/pmos-wifi.txt (IP address, interface, Wi-Fi driver / firmware lines): readable from TWRP
+#   * the same service prints a one-line Wi-Fi status on the phone screen (/dev/tty1) every 8 s for about 6 minutes
 # usage: sudo bash scripts/setup-wifi-ssh.sh work/pmos-root.img
 set -euxo pipefail
 IMG="${1:?usage: setup-wifi-ssh.sh root.img}"
@@ -23,6 +23,7 @@ ls "$M"/usr/sbin/wpa_supplicant "$M"/sbin/wpa_supplicant 2>&1 || echo "WARN: wpa
 ls "$M"/usr/bin/nmcli 2>&1 || echo "WARN: nmcli not found (the retry helper will only log)"
 ls "$M"/usr/sbin/sshd 2>&1 || echo "WARN: sshd not found (openssh missing?)"
 ls "$M"/lib/firmware 2>&1 | head -n 40 || true
+ls -l "$M"/lib/firmware/brcm 2>&1 | grep -iE '43430|a2core' || echo "WARN: no 43430 / a2core files in /lib/firmware/brcm"
 
 # ---- NetworkManager profile for the hotspot ----
 UUID=$(cat /proc/sys/kernel/random/uuid)
@@ -67,16 +68,17 @@ else
   echo "WARN: no /etc/ssh/sshd_config in the image"
 fi
 
-# ---- Wi-Fi helper: retries the connection and logs the state ----
+# ---- Wi-Fi helper: reloads the driver if needed, retries the connection and logs the state ----
 install -d "$M/usr/local/sbin" "$M/var/log"
 cat > "$M/usr/local/sbin/pmos-wifi" <<'WEOF'
 #!/bin/sh
-# Joins the hotspot after boot (NetworkManager autoconnects by itself; this retries and logs what happens).
+# pmos-wifi v2: joins the hotspot after boot. Reloads brcmfmac when the first load failed (no wlan interface).
 # Log: /var/log/pmos-wifi.txt (readable from TWRP). A one-line status is also printed on the phone screen.
 OUT=/var/log/pmos-wifi.txt
 SSID="__SSID__"
 log() { echo "$*" >> "$OUT"; sync; }
 screen() { echo "[pmos-wifi] $*" > /dev/tty1 2>/dev/null || true; }
+have_wlan() { ls /sys/class/net | grep -q '^wl'; }
 status() {
   IF=$(ls /sys/class/net | grep '^wl' | head -n1)
   if [ -z "$IF" ]; then
@@ -102,21 +104,31 @@ snap() {
     echo "-- nmcli wifi list"; nmcli -f SSID,SIGNAL,CHAN,FREQ device wifi list 2>&1
     echo "-- nmcli connection"; nmcli connection show 2>&1
     echo "-- processes"; ps | grep -E 'NetworkManager|wpa_supplicant|sshd' | grep -v grep
-    echo "-- wifi modules"; lsmod | grep -iE '80211|brcm|bcm|wlan|cfg'
-    echo "-- wifi lines of dmesg"; dmesg | grep -iE 'wlan|wifi|wl:|brcm|bcm|cfg80211|firmware|sdio|mmc' | tail -n 80
+    echo "-- wifi modules"; lsmod | grep -iE '80211|brcm|bcm|wlan|cfg|hci'
+    echo "-- wifi lines of dmesg"; dmesg | grep -iE 'wlan|wifi|wl:|brcm|bcm|cfg80211|firmware|sdio|mmc|ieee80211|Bluetooth' | tail -n 80
   } >> "$OUT" 2>&1
   sync
 }
 : > "$OUT"
-log "== pmos-wifi started at $(date), SSID $SSID"
+log "== pmos-wifi v2 started at $(date), SSID $SSID"
 status_loop &
 rfkill unblock all >/dev/null 2>&1
-n=0
-while [ $n -lt 40 ]; do
-  ls /sys/class/net | grep -q '^wl' && break
-  n=$((n+1)); sleep 3
+sleep 20
+n=1
+while [ $n -le 5 ] && ! have_wlan; do
+  log "-- reload $n: brcmfmac"
+  if [ $n -ge 3 ]; then
+    log "-- (attempt $n: unloading the Bluetooth UART driver first)"
+    modprobe -r hci_uart btbcm >> "$OUT" 2>&1
+  fi
+  modprobe -r brcmfmac_wcc brcmfmac >> "$OUT" 2>&1
+  sleep 3
+  modprobe brcmfmac >> "$OUT" 2>&1
+  sleep 15
+  log "$(dmesg | grep -iE 'brcmf|ieee80211' | tail -n 8)"
+  n=$((n+1))
 done
-ls /sys/class/net | grep -q '^wl' || log "!! no wlan interface after 2 minutes: the Wi-Fi driver / firmware is not working in this kernel"
+have_wlan || log "!! no wlan interface after the reloads: the Wi-Fi driver / firmware is not working in this kernel"
 snap
 if command -v nmcli >/dev/null 2>&1; then
   n=1
