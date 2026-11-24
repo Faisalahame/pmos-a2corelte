@@ -40,6 +40,21 @@ done
 ls -l "$M"/lib/firmware/brcm | grep -iE '43430|43436|a2core'
 cmp "$NVRAM_SRC" "$M/lib/firmware/brcm/brcmfmac43430b0-sdio.txt" && echo "A2 Core Wi-Fi NVRAM installed"
 
+# The phone's own Wi-Fi firmware for this chip (stock /vendor/etc/wifi/bcmdhd_sta.bin_36, BCM43436B0 9.88.35, the one that
+# belongs to the NVRAM above) and its CLM blob (bcmdhd_clm.blob). They go in under the board-specific name, which brcmfmac
+# tries before the generic one. The generic (Raspberry Pi Zero 2 W) firmware stays in the image as the fallback: the Wi-Fi
+# helper switches to it by itself if the phone's own firmware does not start.
+FWSRC="$(dirname "$0")/../firmware"
+for ext in bin clm_blob; do
+  f="brcmfmac43430b0-sdio.samsung,a2corelte.$ext"
+  [ -s "$FWSRC/$f" ] || { echo "ERROR: $FWSRC/$f missing"; exit 1; }
+  rm -f "$M/lib/firmware/brcm/$f"
+  install -m 644 "$FWSRC/$f" "$M/lib/firmware/brcm/$f"
+done
+grep -aq '43436b0-roml' "$M/lib/firmware/brcm/brcmfmac43430b0-sdio.samsung,a2corelte.bin" || { echo "ERROR: the A2 Core Wi-Fi firmware is not the 43436b0 one"; exit 1; }
+ls -l "$M"/lib/firmware/brcm | grep -E 'a2corelte'
+echo "A2 Core Wi-Fi firmware installed"
+
 # ---- NetworkManager profile for the hotspot ----
 UUID=$(cat /proc/sys/kernel/random/uuid)
 install -d -m 755 "$M/etc/NetworkManager/system-connections" "$M/etc/NetworkManager/conf.d"
@@ -132,15 +147,19 @@ sleep 20
 n=1
 while [ $n -le 5 ] && ! have_wlan; do
   log "-- reload $n: brcmfmac"
-  if [ $n -ge 3 ]; then
-    log "-- (attempt $n: unloading the Bluetooth UART driver first)"
-    modprobe -r hci_uart btbcm >> "$OUT" 2>&1
+  if [ $n -eq 3 ]; then
+    FWD=/lib/firmware/brcm
+    if [ -e "$FWD/brcmfmac43430b0-sdio.samsung,a2corelte.bin" ]; then
+      log "-- attempt 3: the phone's own Wi-Fi firmware did not start, falling back to the generic firmware"
+      mv "$FWD/brcmfmac43430b0-sdio.samsung,a2corelte.bin" "$FWD/brcmfmac43430b0-sdio.samsung,a2corelte.bin.off" >> "$OUT" 2>&1
+      [ -e "$FWD/brcmfmac43430b0-sdio.samsung,a2corelte.clm_blob" ] && mv "$FWD/brcmfmac43430b0-sdio.samsung,a2corelte.clm_blob" "$FWD/brcmfmac43430b0-sdio.samsung,a2corelte.clm_blob.off" >> "$OUT" 2>&1
+    fi
   fi
   modprobe -r brcmfmac_wcc brcmfmac >> "$OUT" 2>&1
   sleep 3
   modprobe brcmfmac >> "$OUT" 2>&1
   sleep 15
-  log "$(dmesg | grep -iE 'brcmf|ieee80211' | tail -n 8)"
+  log "$(dmesg | grep -iE 'brcmf|ieee80211' | tail -n 10)"
   n=$((n+1))
 done
 have_wlan || log "!! no wlan interface after the reloads: the Wi-Fi driver / firmware is not working in this kernel"

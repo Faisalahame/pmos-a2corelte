@@ -14,7 +14,6 @@ main() {
   python3 scripts/apply-display-backport.py
   python3 scripts/apply-ccache.py
   python3 scripts/apply-pmic-fix.py
-  python3 scripts/apply-sdio-fix.py
   exec bash scripts/build-pmos.sh
 }
 main "$@"
