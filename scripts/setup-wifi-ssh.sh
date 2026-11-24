@@ -4,6 +4,8 @@
 #   * sshd + networkmanager + dbus switched on (OpenRC), password login allowed
 #   * pmos-wifi service: un-blocks Wi-Fi, retries "nmcli connection up" for about 2 minutes after boot and writes
 #     /var/log/pmos-wifi.txt (IP address, interface, Wi-Fi driver / firmware lines): readable from TWRP, no SSH needed
+#   * the same service prints a one-line Wi-Fi status on the phone screen (/dev/tty1) every 8 s for about 6 minutes:
+#     interface, state, IP address, whether the hotspot is visible, NetworkManager / sshd running
 # usage: sudo bash scripts/setup-wifi-ssh.sh work/pmos-root.img
 set -euxo pipefail
 IMG="${1:?usage: setup-wifi-ssh.sh root.img}"
@@ -70,10 +72,25 @@ install -d "$M/usr/local/sbin" "$M/var/log"
 cat > "$M/usr/local/sbin/pmos-wifi" <<'WEOF'
 #!/bin/sh
 # Joins the hotspot after boot (NetworkManager autoconnects by itself; this retries and logs what happens).
-# Log: /var/log/pmos-wifi.txt (readable from TWRP)
+# Log: /var/log/pmos-wifi.txt (readable from TWRP). A one-line status is also printed on the phone screen.
 OUT=/var/log/pmos-wifi.txt
 SSID="__SSID__"
 log() { echo "$*" >> "$OUT"; sync; }
+screen() { echo "[pmos-wifi] $*" > /dev/tty1 2>/dev/null || true; }
+status() {
+  IF=$(ls /sys/class/net | grep '^wl' | head -n1)
+  if [ -z "$IF" ]; then
+    screen "no wlan interface: Wi-Fi driver/firmware not loaded"
+  else
+    IP=$(ip -4 addr show "$IF" 2>/dev/null | awk '/inet /{print $2}')
+    ST=$(nmcli -t -f DEVICE,STATE device 2>/dev/null | grep "^$IF:" | cut -d: -f2)
+    SEEN=$(nmcli -t -f SSID device wifi list 2>/dev/null | grep -cx "$SSID")
+    NM=down; pidof NetworkManager >/dev/null 2>&1 && NM=up
+    SS=down; pidof sshd >/dev/null 2>&1 && SS=up
+    screen "$IF state=${ST:-?} ip=${IP:-none} ssid_seen=$SEEN nm=$NM sshd=$SS"
+  fi
+}
+status_loop() { n=0; while [ $n -lt 45 ]; do status; n=$((n+1)); sleep 8; done; }
 connected() { nmcli -t -f DEVICE,STATE device 2>/dev/null | grep -q '^wl.*:connected$'; }
 snap() {
   {
@@ -92,6 +109,7 @@ snap() {
 }
 : > "$OUT"
 log "== pmos-wifi started at $(date), SSID $SSID"
+status_loop &
 rfkill unblock all >/dev/null 2>&1
 n=0
 while [ $n -lt 40 ]; do
