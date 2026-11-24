@@ -25,6 +25,21 @@ ls "$M"/usr/sbin/sshd 2>&1 || echo "WARN: sshd not found (openssh missing?)"
 ls "$M"/lib/firmware 2>&1 | head -n 40 || true
 ls -l "$M"/lib/firmware/brcm 2>&1 | grep -iE '43430|a2core' || echo "WARN: no 43430 / a2core files in /lib/firmware/brcm"
 
+# ---- Wi-Fi NVRAM: the phone's own (BCM43436B0, "A2_CORE rev01", xtalfreq 37.4 MHz), taken from the stock vendor.img ----
+# The image used to link these names to the Raspberry Pi Zero 2 W NVRAM, which is for another board. brcmfmac asks for the
+# board-specific name first (samsung,a2corelte), then the plain name; both now get the A2 Core file. The firmware .bin and
+# the .clm_blob stay as they are.
+NVRAM_SRC="$(dirname "$0")/../firmware/brcmfmac43430b0-sdio.samsung,a2corelte.txt"
+[ -s "$NVRAM_SRC" ] || { echo "ERROR: $NVRAM_SRC missing"; exit 1; }
+grep -q '^xtalfreq=37400' "$NVRAM_SRC" || { echo "ERROR: $NVRAM_SRC is not the A2 Core NVRAM"; exit 1; }
+install -d -m 755 "$M/lib/firmware/brcm"
+for n in brcmfmac43430b0-sdio.samsung,a2corelte.txt brcmfmac43430b0-sdio.txt; do
+  rm -f "$M/lib/firmware/brcm/$n"
+  install -m 644 "$NVRAM_SRC" "$M/lib/firmware/brcm/$n"
+done
+ls -l "$M"/lib/firmware/brcm | grep -iE '43430|43436|a2core'
+cmp "$NVRAM_SRC" "$M/lib/firmware/brcm/brcmfmac43430b0-sdio.txt" && echo "A2 Core Wi-Fi NVRAM installed"
+
 # ---- NetworkManager profile for the hotspot ----
 UUID=$(cat /proc/sys/kernel/random/uuid)
 install -d -m 755 "$M/etc/NetworkManager/system-connections" "$M/etc/NetworkManager/conf.d"
