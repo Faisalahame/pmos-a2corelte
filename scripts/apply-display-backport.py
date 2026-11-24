@@ -19,8 +19,9 @@ kernel package is built from mainline 6.19.x instead of 6.15:
      within minutes
   6. (run of 23:12) the old patch set's battery fuel gauge driver s2mu005_fg.c does not compile on 6.19 (struct
      power_supply_config has no of_node any more): prepare() rewrites power_supply_config.of_node -> fwnode
-  7. the kernel build runs with "make -k": it keeps compiling after an error, so ONE run lists ALL compile errors
-     (work/pmb-compile-errors.log) instead of one error per 25 minute run
+  7. (run of 00:23) the kernel built; the boot image step failed in dtbTool-exynos: mainline's a2corelte dtb has no
+     model_info-* properties -> they are added to the dts in prepare()
+  8. speed: kernel config without debug info / BTF (the first full build took 55 minutes)
 The touchscreen fixes (rmi4 changes) stay as they were.
 """
 import sys
@@ -53,6 +54,10 @@ rep(
   printf '%s\\n' CONFIG_BACKLIGHT_CLASS_DEVICE=y CONFIG_DRM_EXYNOS=y CONFIG_DRM_EXYNOS7_DECON=y CONFIG_DRM_EXYNOS_DSI=y \\
     CONFIG_DRM_SAMSUNG_DSIM=y CONFIG_PHY_EXYNOS_MIPI_VIDEO=y CONFIG_DRM_PANEL_SYNAPTICS_TDDI=y >> "$KCFG"
   grep -E 'TDDI|BACKLIGHT_CLASS|DRM_EXYNOS|DSIM|MIPI_VIDEO' "$KCFG" | tee -a work/kernel-touch-config.log || true
+  # faster kernel build: no debug info / BTF (DWARF + pahole were most of the 55 minute compile)
+  sed -i '/^CONFIG_DEBUG_INFO/d;/^# CONFIG_DEBUG_INFO/d;/^CONFIG_MODULE_ALLOW_BTF_MISMATCH/d;/^# CONFIG_MODULE_ALLOW_BTF_MISMATCH/d' "$KCFG"
+  printf '%s\\n' CONFIG_DEBUG_INFO_NONE=y >> "$KCFG"
+  grep -E 'DEBUG_INFO|BTF' "$KCFG" | tee -a work/kernel-touch-config.log || true
 """,
 )
 
@@ -84,7 +89,6 @@ rep("\\t\\tcp \\"$dts\\" \\"arch/arm64/boot/dts/exynos/\\"\\n", "\\n".join([
  "\\t\\t\\tcontinue",
  "\\t\\tfi",
  "\\t\\tcp \\"$dts\\" \\"arch/arm64/boot/dts/exynos/\\"", ""]))
-rep("\\tunset LDFLAGS\\n", "\\tunset LDFLAGS\\n\\texport MAKEFLAGS=\\"$MAKEFLAGS -k\\"\\n")
 open(p, "w").write(t)
 print("kernel APKBUILD: mainline", os.environ["KPKGVER"], "with tolerant patching")
 PYEOF
@@ -145,7 +149,7 @@ rep(
 """,
 )
 
-# ---- 6. keep going after a compile error (make -k is set in the APKBUILD) and list ALL errors when the build fails -----
+# ---- 6. list ALL compile errors when the build fails -------------------------------------------------------------------
 rep(
     """| tail -n 40 | cut -c1-300 | tee work/pmb-kernel-errors.log || true
 """,
@@ -153,6 +157,22 @@ rep(
   { grep -aE 'pmos-a2corelte (kernel|display)' "$WORK/log.txt" 2>/dev/null | sort -u | head -n 40
     grep -aE ' error: |undefined reference|ld.lld: error|Error 1$' "$WORK/log.txt" 2>/dev/null | sort -u | head -n 60; } \\
     | cut -c1-300 | tee work/pmb-compile-errors.log || true
+""",
+)
+
+# ---- 7. dtbTool-exynos needs model_info-* in the root of the dtb (run of 00:23: "could not load device tree blobs") ------
+rep(
+    """	make ARCH="$_carch" LLVM=1 olddefconfig
+""",
+    r"""	# dtbTool-exynos (boot-deploy builds the Samsung dt.img with it) needs model_info-* in the root of the dtb. Mainline 6.19
+	# dropped them; same values as the old exynos7870 patch set / the first upstream submission.
+	if ! grep -q 'model_info-chip' "$_dts" arch/arm64/boot/dts/exynos/exynos7870.dtsi; then
+		awk '{ print } /^[[:space:]]*compatible = "samsung,a2corelte"/ { print "\tmodel_info-hw_rev = <0>;"; print "\tmodel_info-hw_rev_end = <255>;"; print "\tmodel_info-chip = <7870>;" }' "$_dts" > "$_dts.new" && mv "$_dts.new" "$_dts"
+	fi
+	grep -q 'model_info-chip' "$_dts" arch/arm64/boot/dts/exynos/exynos7870.dtsi || { echo "pmos-a2corelte display: ERROR no model_info-chip in the devicetree (dtbTool-exynos needs it)"; return 1; }
+	echo "pmos-a2corelte display: $(grep -h 'model_info' "$_dts" arch/arm64/boot/dts/exynos/exynos7870.dtsi | tr -d '\t\n')"
+	make ARCH="$_carch" LLVM=1 olddefconfig
+	echo "pmos-a2corelte kernel: lines CONFIG_DEBUG_INFO_BTF=y in .config: $(grep -c '^CONFIG_DEBUG_INFO_BTF=y' .config) (0 = off)"
 """,
 )
 
