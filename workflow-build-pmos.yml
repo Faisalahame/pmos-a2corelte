@@ -33,10 +33,29 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y qemu-user-static binfmt-support e2fsprogs pigz curl git xz-utils kmod \
             zstd lz4 bzip2 binutils zip unzip android-sdk-libsparse-utils fdisk util-linux openssl procps python3
+      - name: Restore ccache (kernel compile cache from the last run)
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.local/var/pmbootstrap/cache_ccache_*
+          key: ccache-${{ github.run_id }}
+          restore-keys: |
+            ccache-
+      - name: ccache folders must be writable inside the pmbootstrap chroot
+        run: |
+          ls -d ~/.local/var/pmbootstrap/cache_ccache_* 2>/dev/null && sudo chmod -R a+rwX ~/.local/var/pmbootstrap/cache_ccache_* || echo "no ccache restored (first run)"
       - name: Build postmarketOS (kernel, boot.img, root filesystem)
         env:
           UI: ${{ inputs.ui || 'phosh' }}
         run: bash scripts/build-pmos.sh
+      - name: Make the ccache readable for the cache upload
+        if: always()
+        run: sudo chmod -R a+rX ~/.local/var/pmbootstrap/cache_ccache_* 2>/dev/null || true
+      - name: Save ccache (also after a failed run, so a retry does not recompile the kernel)
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.local/var/pmbootstrap/cache_ccache_*
+          key: ccache-${{ github.run_id }}
       - name: Prepare the root filesystem (fstab, first-boot grow, sshd, USB network)
         run: sudo bash scripts/fixup-rootfs.sh work/pmos-root.img 2>&1 | tee work/fixup.log
       - name: Make the Samsung boot image (raw kernel, tiny initramfs)
