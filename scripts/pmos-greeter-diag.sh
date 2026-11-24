@@ -62,7 +62,7 @@ snap() {
     echo "== kernel log: drm / panel / gpu / crashes"
     dmesg | grep -iE 'drm|dsi|panel|decon|panfrost|segfault|unhandled|audit|oom|killed' | tail -n 40
     echo "== /var/log/phrog-session.log (last 400 lines)"; tail -n 400 /var/log/phrog-session.log 2>&1
-    if [ -e /var/log/messages ]; then echo "== /var/log/messages (last 300 lines)"; tail -n 300 /var/log/messages; else echo "(no /var/log/messages: no syslog)"; fi
+    echo "== logread (syslogd keeps a circular buffer, no /var/log/messages) last 300 lines"; logread 2>&1 | tail -n 300
     echo "== live probe of the greeter shell"
     if [ "$1" -ge 2 ]; then live_probe; else echo "(only from pass 2)"; fi
     echo "== end of pass $1"
