@@ -81,6 +81,46 @@ else
   echo "WARN: $D does not exist"
 fi
 
+# ---- greeter debugging (why is the greeter UI missing even though phoc + gnome-session run?) ----
+SD_DIR="$(dirname "$0")"
+install -d "$M/var/log"
+# 1) everything the greeter session prints goes to /var/log/phrog-session.log (greetd runs as user greetd, so the file is world-writable)
+G="$M/usr/libexec/phrog-greetd-session"
+if [ -e "$G" ] && [ ! -e "$G.real" ]; then
+  mv "$G" "$G.real"
+  install -m 755 "$SD_DIR/phrog-session-wrapper.sh" "$G"
+  echo "greeter-fix: wrapped $G"
+  head -c 300 "$G.real" | head -n 8 || true
+else
+  echo "WARN greeter-fix: $G missing or already wrapped, session log not enabled"
+fi
+: > "$M/var/log/phrog-session.log"
+chmod 666 "$M/var/log/phrog-session.log"
+# 2) snapshot service: /var/log/pmos-greeter.txt at 45, 90, 180 and 300 s
+install -m 755 "$SD_DIR/pmos-greeter-diag.sh" "$M/usr/local/sbin/pmos-greeter-diag"
+cat > "$M/etc/init.d/pmos-greeter-diag" <<'EOFSVC'
+#!/sbin/openrc-run
+description="Greeter diagnostics (/var/log/pmos-greeter.txt)"
+depend() {
+	need localmount
+}
+start() {
+	ebegin "Saving greeter diagnostics"
+	start-stop-daemon --start --background --exec /usr/local/sbin/pmos-greeter-diag
+	eend 0
+}
+EOFSVC
+chmod 755 "$M/etc/init.d/pmos-greeter-diag"
+ln -sf /etc/init.d/pmos-greeter-diag "$M/etc/runlevels/default/pmos-greeter-diag"
+# 3) a syslog, so that dbus, elogind and polkit have somewhere to write (/var/log/messages)
+if [ -e "$M/etc/init.d/syslog" ]; then
+  mkdir -p "$M/etc/runlevels/boot"
+  ln -sf /etc/init.d/syslog "$M/etc/runlevels/boot/syslog"
+  echo "greeter-fix: syslog enabled"
+else
+  echo "WARN greeter-fix: no /etc/init.d/syslog in the image"
+fi
+
 sync
 umount "$M"
 e2fsck -fn "$IMG"
