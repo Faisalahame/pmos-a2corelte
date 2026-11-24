@@ -233,6 +233,21 @@ else
   echo "WARN: /etc/init.d/greetd does not exist in the image"
 fi
 
+# ---- Bluetooth off: keep the shared Wi-Fi/Bluetooth chip quiet while Wi-Fi starts ----
+# On the boots that failed, the Bluetooth firmware download (7.4 s) and the Wi-Fi firmware load (7.4 s) hit the same BCM43430B0
+# chip at the same moment, and the first Wi-Fi frame comes back as "bad data offset". Not loading the Bluetooth modules is a test of that.
+if [ -d "$M/etc" ]; then
+  mkdir -p "$M/etc/modprobe.d"
+  cat > "$M/etc/modprobe.d/pmos-a2corelte-no-bluetooth.conf" <<'MODEOF'
+# pmos-a2corelte: no Bluetooth until Wi-Fi is reliable (remove this file to turn it back on)
+blacklist hci_uart
+blacklist btbcm
+install hci_uart /bin/true
+install btbcm /bin/true
+MODEOF
+  echo "Bluetooth modules disabled:"; cat "$M/etc/modprobe.d/pmos-a2corelte-no-bluetooth.conf"
+fi
+
 sync
 umount "$M"
 e2fsck -fn "$IMG"
