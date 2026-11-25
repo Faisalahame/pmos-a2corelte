@@ -7,6 +7,8 @@
 # comes up (scripts/apply-panel-reset.py), replays the Samsung stock TD4101 vendor init (36 commands) in the
 # panel driver (scripts/apply-panel-init.py, must run after apply-panel-reset.py), and runs it.
 # scripts/apply-greeter-fix.py hooks scripts/greeter-fix.sh into fixup-rootfs.sh (greeter waits for the display).
+# scripts/apply-touch-watch.py (diagnostic only, not a fix) makes pmos-diag read the touch chip without ever
+# re-probing it, so the touch supply is not power-cycled (see the comment in that script).
 # To build the old 6.15 kernel again, run the workflow on main.
 main() {
   set -euo pipefail
@@ -22,6 +24,7 @@ main() {
   python3 scripts/apply-wifi-fix.py
   python3 scripts/apply-sdio-fix.py
   python3 scripts/apply-greeter-fix.py
+  python3 scripts/apply-touch-watch.py
   exec bash scripts/build-pmos.sh
 }
 main "$@"
