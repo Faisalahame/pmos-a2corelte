@@ -9,6 +9,9 @@
 # scripts/apply-greeter-fix.py hooks scripts/greeter-fix.sh into fixup-rootfs.sh (greeter waits for the display).
 # scripts/apply-touch-watch.py (diagnostic only, not a fix) makes pmos-diag read the touch chip without ever
 # re-probing it, so the touch supply is not power-cycled (see the comment in that script).
+# scripts/apply-rmi-builtin.py (diagnostic only, must run last) forces the RMI4 touch driver to be built in (=y): the
+# running 6.19 kernel had it as a module (the =y lines from main's script did not take effect), so the chip was first read
+# at about 7 s instead of about 2-3 s. It fails prepare() within minutes if the symbols are not =y.
 # To build the old 6.15 kernel again, run the workflow on main.
 main() {
   set -euo pipefail
@@ -25,6 +28,7 @@ main() {
   python3 scripts/apply-sdio-fix.py
   python3 scripts/apply-greeter-fix.py
   python3 scripts/apply-touch-watch.py
+  python3 scripts/apply-rmi-builtin.py
   exec bash scripts/build-pmos.sh
 }
 main "$@"
